@@ -22,6 +22,7 @@ if (!DEST) {
 
 const INCLUDED_PATHS = [
   ".codex-plugin",
+  "CHANGELOG.md",
   "LICENSE",
   "NOTICE",
   "README.md",
