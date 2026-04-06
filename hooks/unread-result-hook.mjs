@@ -6,8 +6,11 @@
  */
 
 import process from "node:process";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { readHookInput } from "./lib/hook-input.mjs";
+import { cleanupAfterOfficialUninstall } from "./lib/plugin-install-guard.mjs";
 import { getConfig, listJobs, patchJob, writeTurnBaseline } from "../scripts/lib/state.mjs";
 import { getWorkingTreeFingerprint } from "../scripts/lib/git.mjs";
 import { nowIso, SESSION_ID_ENV } from "../scripts/lib/tracked-jobs.mjs";
@@ -15,6 +18,7 @@ import { resolveWorkspaceRoot } from "../scripts/lib/workspace.mjs";
 
 const MAX_LISTED_JOBS = 3;
 const SKIP_INTERACTIVE_HOOKS_ENV = "CLAUDE_COMPANION_SKIP_INTERACTIVE_HOOKS";
+const ROOT_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 function isExplicitClaudeStatusRequest(prompt) {
   const text = String(prompt ?? "").toLowerCase();
@@ -97,6 +101,9 @@ function captureTurnBaseline(workspaceRoot, sessionId, cwd) {
 
 async function main() {
   const input = readHookInput();
+  if (cleanupAfterOfficialUninstall(ROOT_DIR)) {
+    return;
+  }
   const cwd = input.cwd || process.cwd();
   const workspaceRoot = resolveWorkspaceRoot(cwd);
   const sessionId = input.session_id || process.env[SESSION_ID_ENV] || null;

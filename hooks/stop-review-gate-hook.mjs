@@ -21,6 +21,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { readHookInput } from "./lib/hook-input.mjs";
+import { cleanupAfterOfficialUninstall } from "./lib/plugin-install-guard.mjs";
 import { loadPromptTemplate, interpolateTemplate } from "../scripts/lib/prompts.mjs";
 import {
   appendStopReviewHistory,
@@ -307,6 +308,9 @@ function evaluateTurnEditGate(cwd, workspaceRoot, sessionId) {
 // ---------------------------------------------------------------------------
 
 async function main() {
+  if (cleanupAfterOfficialUninstall(ROOT_DIR)) {
+    return;
+  }
   const input = readHookInput();
   const cwd = input.cwd || process.env.CLAUDE_PROJECT_DIR || process.cwd();
   const workspaceRoot = resolveWorkspaceRoot(cwd);

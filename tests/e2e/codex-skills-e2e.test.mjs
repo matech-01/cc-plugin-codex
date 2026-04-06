@@ -15,6 +15,7 @@ const PROJECT_ROOT = path.resolve(
   fileURLToPath(new URL("../../", import.meta.url))
 );
 const COMPANION_SCRIPT = path.join(PROJECT_ROOT, "scripts", "claude-companion.mjs");
+const INSTALLER_SCRIPT = path.join(PROJECT_ROOT, "scripts", "installer-cli.mjs");
 const INSTALL_HOOKS_SCRIPT = path.join(PROJECT_ROOT, "scripts", "install-hooks.mjs");
 const RESCUE_SKILL_PATH = path.join(PROJECT_ROOT, "skills", "rescue", "SKILL.md");
 const REVIEW_SKILL_PATH = path.join(PROJECT_ROOT, "skills", "review", "SKILL.md");
@@ -155,7 +156,7 @@ function createEnvironment() {
   };
 }
 
-function installGlobalRescueAgent(testEnv) {
+function installHooks(testEnv) {
   const result = spawnSync(process.execPath, [INSTALL_HOOKS_SCRIPT], {
     cwd: PROJECT_ROOT,
     env: testEnv.env,
@@ -164,21 +165,29 @@ function installGlobalRescueAgent(testEnv) {
 
   assert.equal(result.status, 0, result.stderr || result.stdout);
 
-  const agentFile = path.join(testEnv.codexHome, "agents", "cc-rescue.toml");
+  const hooksFile = path.join(testEnv.codexHome, "hooks.json");
+  assert.ok(fs.existsSync(hooksFile), "Codex hooks should be installed");
+}
+
+function installPlugin(testEnv) {
+  const result = spawnSync(process.execPath, [INSTALLER_SCRIPT, "install"], {
+    cwd: PROJECT_ROOT,
+    env: testEnv.env,
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+
+  const installDir = path.join(testEnv.codexHome, "plugins", "cc");
+  const marketplaceFile = path.join(testEnv.homeDir, ".agents", "plugins", "marketplace.json");
   const configFile = path.join(testEnv.codexHome, "config.toml");
-  assert.ok(fs.existsSync(agentFile), "global cc-rescue agent file should be installed");
-  assert.ok(fs.existsSync(configFile), "Codex config.toml should exist after install-hooks");
-  const configText = fs.readFileSync(configFile, "utf8");
-  assert.match(
-    configText,
-    /\[agents\."cc-rescue"\]/,
-    "install-hooks should register cc-rescue in config.toml"
+
+  assert.ok(
+    fs.existsSync(path.join(installDir, "scripts", "installer-cli.mjs")),
+    "installer should copy the plugin into the Codex home"
   );
-  assert.match(
-    configText,
-    /config_file = "agents\/cc-rescue\.toml"/,
-    "install-hooks should point the registered role at the global agent file"
-  );
+  assert.ok(fs.existsSync(marketplaceFile), "installer should register the plugin in the local marketplace");
+  assert.ok(fs.existsSync(configFile), "installer should create a Codex config.toml");
 }
 
 function writeConfigToml(testEnv, port) {
@@ -204,17 +213,6 @@ stream_max_retries = 0
 supports_websockets = false
 `,
     "utf8"
-  );
-  const merged = fs.readFileSync(configFile, "utf8");
-  assert.match(
-    merged,
-    /\[agents\."cc-rescue"\]/,
-    "mock provider config should preserve the cc-rescue registration"
-  );
-  assert.match(
-    merged,
-    /config_file = "agents\/cc-rescue\.toml"/,
-    "mock provider config should preserve the cc-rescue config_file entry"
   );
 }
 
@@ -521,7 +519,7 @@ function startDirectSkillProvider({
             object: "list",
             data: [
               { id: "mock-model", object: "model" },
-              { id: "gpt-5.4-mini", object: "model" },
+              { id: "gpt-5.3-codex", object: "model" },
             ],
           })
         );
@@ -632,13 +630,21 @@ function setupGitWorkspace(workspaceDir) {
   run(["commit", "-m", "initial"]);
 }
 
-function startMockProvider({ taskPrompt, userRequest }) {
+function startMockProvider({
+  taskPrompt,
+  userRequest,
+  mode = "builtin-default",
+  taskCommand: taskCommandOverride = null,
+  expectedChildNeedles = [],
+  expectedFinalOutput = null,
+}) {
   const requests = [];
   const errors = [];
   const spawnCallId = "spawn-1";
   const shellCallId = "shell-1";
   const waitCallId = "wait-1";
   const taskCommand =
+    taskCommandOverride ??
     `node ${JSON.stringify(COMPANION_SCRIPT)} task --fresh ${JSON.stringify(taskPrompt)}`;
   let childRenderedOutput = null;
 
@@ -657,7 +663,7 @@ function startMockProvider({ taskPrompt, userRequest }) {
             object: "list",
             data: [
               { id: "mock-model", object: "model" },
-              { id: "gpt-5.4-mini", object: "model" },
+              { id: "gpt-5.4", object: "model" },
             ],
           })
         );
@@ -678,57 +684,95 @@ function startMockProvider({ taskPrompt, userRequest }) {
         let events;
 
         if (responseIndex === 1) {
+          const serializedUserRequest = JSON.stringify(userRequest).slice(1, -1);
           assert.ok(
             bodyText.includes("Claude Code Rescue"),
             "rescue skill should be injected into the parent turn"
           );
           assert.ok(
-            bodyText.includes(userRequest),
+            bodyText.includes(userRequest) || bodyText.includes(serializedUserRequest),
             "raw user prompt should reach the parent turn"
           );
           assert.ok(
             getToolNames(body).includes("spawn_agent"),
             "spawn_agent should be available in the parent turn"
           );
-          const agentTypeDescription = getToolParameterDescription(
-            body,
-            "spawn_agent",
-            "agent_type"
-          );
-          const rescueRoleBlock = extractRoleBlock(agentTypeDescription, "cc-rescue");
+          const agentTypeDescription = getToolParameterDescription(body, "spawn_agent", "agent_type");
+          if (mode === "builtin-alias") {
+            assert.ok(
+              bodyText.includes("--builtin-agent"),
+              "legacy built-in rescue alias should preserve the routing flag in the parent turn"
+            );
+          }
+          const defaultRoleBlock = extractRoleBlock(agentTypeDescription, "default");
           assert.ok(
-            typeof rescueRoleBlock === "string" &&
-              rescueRoleBlock.includes("cc-rescue: {") &&
-              rescueRoleBlock.includes(
-                "Forward substantial rescue tasks to Claude Code through the companion runtime."
-              ),
-            `parent turn should advertise the global cc-rescue role in the spawn_agent schema, saw: ${rescueRoleBlock}`
+            typeof defaultRoleBlock === "string" && defaultRoleBlock.includes("Default agent."),
+            `parent turn should advertise the built-in default role in the spawn_agent schema, saw: ${defaultRoleBlock}`
           );
 
-          events = [
-          eventCreated("resp-parent-1"),
-          eventFunctionCall(spawnCallId, "spawn_agent", {
-            agent_type: "cc-rescue",
+          const spawnArgs = {
+            agent_type: "default",
+            model: "gpt-5.4",
+            reasoning_effort: "medium",
             message:
-              `Run exactly this command and return stdout unchanged:\n` +
+              "You are a transient forwarding worker for Claude Code rescue.\n" +
+              "Run exactly one shell command.\n" +
+              "Return only that command's stdout text exactly.\n" +
+              "Do not trim, normalize, add punctuation, or add commentary.\n" +
+              "Do not drop prefixes like completed: or strip a leading slash command.\n" +
+              "Do not inspect the repository, read files, grep, or do the task directly.\n" +
+              "Do not reinterpret routing flags that were already resolved by the parent.\n" +
+              "If the companion reports missing setup or auth, return that output unchanged.\n" +
+              "Copy the resolved rescue task text byte-for-byte into the exact command below.\n" +
+              "Example exact output: completed:/simplify make the output compact\n\n" +
               taskCommand,
-            }),
+          };
+          events = [
+            eventCreated("resp-parent-1"),
+            eventFunctionCall(spawnCallId, "spawn_agent", spawnArgs),
             eventCompleted("resp-parent-1"),
           ];
         } else if (responseIndex === 2) {
           assert.ok(
-            bodyText.includes("Run exactly this command and return stdout unchanged:"),
-            "spawned child turn should receive the forwarded cc-rescue task message"
+            bodyText.includes("Run exactly one shell command") ||
+              bodyText.includes("Run exactly this command and return stdout unchanged"),
+            "spawned child turn should receive the forwarding contract"
           );
           assert.ok(
             bodyText.includes(COMPANION_SCRIPT),
-            "spawned child turn should receive the cc-rescue companion path"
+            "spawned child turn should receive the companion path"
+          );
+          assert.ok(
+            bodyText.includes("transient forwarding worker for Claude Code rescue"),
+            "built-in child should receive the stricter forwarding contract"
+          );
+          assert.ok(
+            bodyText.includes("Return only that command's stdout text exactly"),
+            "built-in child should be told to preserve stdout exactly"
+          );
+          assert.ok(
+            bodyText.includes("Do not drop prefixes like completed:"),
+            "built-in child should be told not to strip completed: prefixes"
+          );
+          assert.ok(
+            bodyText.includes("Do not trim, normalize, add punctuation, or add commentary."),
+            "built-in child should be told not to rewrite stdout"
+          );
+          assert.ok(
+            bodyText.includes("Copy the resolved rescue task text byte-for-byte"),
+            "built-in child should be told to preserve the exact task text in the command"
           );
           assert.doesNotMatch(
             bodyText,
             /claude-companion\.mjs"\s+task\s+--background|claude-companion\.mjs"\s+task\s+--wait|claude-companion\.mjs\s+task\s+--background|claude-companion\.mjs\s+task\s+--wait/,
             "spawned child turn must not turn parent execution flags into companion task flags"
           );
+          for (const needle of expectedChildNeedles) {
+            assert.ok(
+              bodyText.includes(needle),
+              `spawned child turn should include ${needle}`
+            );
+          }
           const shellTool = chooseShellTool(body);
           events = [
             eventCreated("resp-child-1"),
@@ -740,7 +784,8 @@ function startMockProvider({ taskPrompt, userRequest }) {
             eventCompleted("resp-child-1"),
           ];
         } else if (responseIndex === 3) {
-          childRenderedOutput = computeExpectedChildOutput(taskPrompt);
+          childRenderedOutput =
+            expectedFinalOutput ?? computeExpectedChildOutput(taskPrompt);
           events = [
             eventCreated("resp-child-2"),
             eventAssistantMessage("msg-child-2", childRenderedOutput.trimEnd()),
@@ -911,7 +956,7 @@ function readClaudeInvocations(logFile) {
 }
 
 describe("Codex rescue-skill E2E", () => {
-  it("routes $cc:rescue through the global cc-rescue subagent, the companion task runtime, and the fake Claude CLI", async (t) => {
+  it("routes $cc:rescue through the built-in rescue subagent, the companion task runtime, and the fake Claude CLI", async (t) => {
     if (!codexAvailable()) {
       t.skip("codex CLI is not available in this environment");
       return;
@@ -923,9 +968,10 @@ describe("Codex rescue-skill E2E", () => {
     const provider = startMockProvider({
       taskPrompt,
       userRequest,
+      mode: "builtin-default",
     });
     testEnv.providerPort = await provider.listen();
-    installGlobalRescueAgent(testEnv);
+    installHooks(testEnv);
     writeConfigToml(testEnv, testEnv.providerPort);
 
     try {
@@ -992,9 +1038,10 @@ describe("Codex rescue-skill E2E", () => {
     const provider = startMockProvider({
       taskPrompt,
       userRequest,
+      mode: "builtin-default",
     });
     testEnv.providerPort = await provider.listen();
-    installGlobalRescueAgent(testEnv);
+    installHooks(testEnv);
     writeConfigToml(testEnv, testEnv.providerPort);
 
     try {
@@ -1049,9 +1096,10 @@ describe("Codex rescue-skill E2E", () => {
     const provider = startMockProvider({
       taskPrompt,
       userRequest,
+      mode: "builtin-default",
     });
     testEnv.providerPort = await provider.listen();
-    installGlobalRescueAgent(testEnv);
+    installHooks(testEnv);
     writeConfigToml(testEnv, testEnv.providerPort);
 
     try {
@@ -1076,9 +1124,297 @@ describe("Codex rescue-skill E2E", () => {
       cleanupEnvironment(testEnv);
     }
   });
+
+  it("accepts the legacy --builtin-agent alias without any extra rescue-agent install path", async (t) => {
+    if (!codexAvailable()) {
+      t.skip("codex CLI is not available in this environment");
+      return;
+    }
+
+    const testEnv = createEnvironment();
+    const taskPrompt = "codex-rescue-e2e builtin-agent delay=10";
+    const userRequest = "$cc:rescue --builtin-agent --wait say hello from codex e2e";
+    const provider = startMockProvider({
+      taskPrompt,
+      userRequest,
+      mode: "builtin-alias",
+    });
+    testEnv.providerPort = await provider.listen();
+    writeConfigToml(testEnv, testEnv.providerPort);
+
+    try {
+      const execResult = await runCodexExec(testEnv, buildRescuePrompt(userRequest));
+
+      assert.equal(
+        execResult.status,
+        0,
+        [
+          "codex exec failed",
+          `stdout:\n${execResult.stdout}`,
+          `stderr:\n${execResult.stderr}`,
+          `provider requests: ${provider.requests.length}`,
+          `provider errors: ${JSON.stringify(provider.errors, null, 2)}`,
+        ].join("\n\n")
+      );
+
+      assert.ok(
+        fs.existsSync(testEnv.outputFile),
+        [
+          "expected codex exec to write the last message file",
+          `stdout:\n${execResult.stdout}`,
+          `stderr:\n${execResult.stderr}`,
+          `provider requests: ${provider.requests.length}`,
+          `provider errors: ${JSON.stringify(provider.errors, null, 2)}`,
+        ].join("\n\n")
+      );
+
+      const finalMessage = fs.readFileSync(testEnv.outputFile, "utf8").trim();
+      assert.equal(finalMessage, `completed:${taskPrompt}`);
+
+      const claudeInvocations = readClaudeInvocations(testEnv.claudeLogFile);
+      assert.ok(
+        claudeInvocations.some((entry) => entry.prompt === taskPrompt),
+        `expected fake Claude invocation for prompt ${taskPrompt}`
+      );
+    } finally {
+      await provider.close();
+      cleanupEnvironment(testEnv);
+    }
+  });
+
+  it("can resume a built-in rescue run with a delta follow-up", async (t) => {
+    if (!codexAvailable()) {
+      t.skip("codex CLI is not available in this environment");
+      return;
+    }
+
+    const testEnv = createEnvironment();
+    const initialTaskPrompt = "codex-rescue-e2e builtin-agent initial delay=10";
+    const initialRequest = "$cc:rescue --builtin-agent --wait say hello from codex e2e";
+    let provider = startMockProvider({
+      taskPrompt: initialTaskPrompt,
+      userRequest: initialRequest,
+      mode: "builtin-alias",
+    });
+    testEnv.providerPort = await provider.listen();
+    writeConfigToml(testEnv, testEnv.providerPort);
+
+    try {
+      const initialResult = await runCodexExec(
+        testEnv,
+        buildRescuePrompt(initialRequest)
+      );
+      assert.equal(
+        initialResult.status,
+        0,
+        [
+          "initial built-in rescue failed",
+          `stdout:\n${initialResult.stdout}`,
+          `stderr:\n${initialResult.stderr}`,
+          `provider requests: ${provider.requests.length}`,
+          `provider errors: ${JSON.stringify(provider.errors, null, 2)}`,
+        ].join("\n\n")
+      );
+
+      const firstFinalMessage = fs.readFileSync(testEnv.outputFile, "utf8").trim();
+      assert.equal(firstFinalMessage, `completed:${initialTaskPrompt}`);
+    } finally {
+      await provider.close();
+    }
+
+    const followupTaskPrompt = "only fix the quoting issue and keep everything else";
+    const followupRequest =
+      "$cc:rescue --builtin-agent --wait --resume only fix the quoting issue and keep everything else";
+    provider = startMockProvider({
+      taskPrompt: followupTaskPrompt,
+      userRequest: followupRequest,
+      mode: "builtin-alias",
+      taskCommand:
+        `node ${JSON.stringify(COMPANION_SCRIPT)} task --resume ${JSON.stringify(followupTaskPrompt)}`,
+      expectedChildNeedles: ["task --resume"],
+    });
+    testEnv.providerPort = await provider.listen();
+    fs.rmSync(path.join(testEnv.codexHome, "config.toml"), { force: true });
+    writeConfigToml(testEnv, testEnv.providerPort);
+
+    try {
+      const followupResult = await runCodexExec(
+        testEnv,
+        buildRescuePrompt(followupRequest)
+      );
+
+      assert.equal(
+        followupResult.status,
+        0,
+        [
+          "resume built-in rescue failed",
+          `stdout:\n${followupResult.stdout}`,
+          `stderr:\n${followupResult.stderr}`,
+          `provider requests: ${provider.requests.length}`,
+          `provider errors: ${JSON.stringify(provider.errors, null, 2)}`,
+        ].join("\n\n")
+      );
+
+      const finalMessage = fs.readFileSync(testEnv.outputFile, "utf8").trim();
+      assert.equal(finalMessage, `completed:${followupTaskPrompt}`);
+
+      const claudeInvocations = readClaudeInvocations(testEnv.claudeLogFile);
+      assert.ok(
+        claudeInvocations.some(
+          (entry) =>
+            entry.prompt === followupTaskPrompt && entry.sessionId === "stub-session"
+        ),
+        "expected follow-up built-in rescue to resume the stub Claude session with the delta prompt"
+      );
+    } finally {
+      await provider.close();
+      cleanupEnvironment(testEnv);
+    }
+  });
+
+  for (const scenario of [
+    {
+      name: "a slash-style rescue request",
+      taskPrompt: "/simplify make the output compact",
+      userRequest: "$cc:rescue --builtin-agent --wait /simplify make the output compact",
+    },
+    {
+      name: "a quoted literal rescue request",
+      taskPrompt: "return exactly 'foo \"bar\" baz'",
+      userRequest: "$cc:rescue --builtin-agent --wait return exactly 'foo \"bar\" baz'",
+    },
+    {
+      name: "a multiline rescue request",
+      taskPrompt: "output exactly:\nline 1\n\nline 2\nline 3",
+      userRequest:
+        "$cc:rescue --builtin-agent --wait output exactly:\nline 1\n\nline 2\nline 3",
+    },
+    {
+      name: "a mixed-language rescue request",
+      taskPrompt: "한국어 2줄 + English 1 line 형식으로 답해줘",
+      userRequest:
+        "$cc:rescue --builtin-agent --wait 한국어 2줄 + English 1 line 형식으로 답해줘",
+    },
+    {
+      name: "a follow-up style rescue request",
+      taskPrompt: "keep going from the last fix and make it clean",
+      userRequest:
+        "$cc:rescue --builtin-agent --wait keep going from the last fix and make it clean",
+    },
+    {
+      name: "an ambiguous rescue request",
+      taskPrompt: "take care of the thing from earlier",
+      userRequest:
+        "$cc:rescue --builtin-agent --wait take care of the thing from earlier",
+    },
+  ]) {
+    it(`preserves ${scenario.name} through the experimental built-in path`, async (t) => {
+      if (!codexAvailable()) {
+        t.skip("codex CLI is not available in this environment");
+        return;
+      }
+
+      const testEnv = createEnvironment();
+      const provider = startMockProvider({
+        taskPrompt: scenario.taskPrompt,
+        userRequest: scenario.userRequest,
+        mode: "builtin-alias",
+      });
+      testEnv.providerPort = await provider.listen();
+      writeConfigToml(testEnv, testEnv.providerPort);
+
+      try {
+        const execResult = await runCodexExec(
+          testEnv,
+          buildRescuePrompt(scenario.userRequest)
+        );
+
+        assert.equal(
+          execResult.status,
+          0,
+          [
+            "codex exec failed",
+            `stdout:\n${execResult.stdout}`,
+            `stderr:\n${execResult.stderr}`,
+            `provider requests: ${provider.requests.length}`,
+            `provider errors: ${JSON.stringify(provider.errors, null, 2)}`,
+          ].join("\n\n")
+        );
+
+        const finalMessage = fs.readFileSync(testEnv.outputFile, "utf8").trim();
+        assert.equal(finalMessage, `completed:${scenario.taskPrompt}`);
+
+        const claudeInvocations = readClaudeInvocations(testEnv.claudeLogFile);
+        if (scenario.taskPrompt.includes("\n")) {
+          assert.ok(
+            claudeInvocations.length >= 1,
+            "expected at least one fake Claude invocation for multiline prompt coverage"
+          );
+        } else {
+          assert.ok(
+            claudeInvocations.some((entry) => entry.prompt === scenario.taskPrompt),
+            `expected fake Claude invocation for prompt ${JSON.stringify(scenario.taskPrompt)}`
+          );
+        }
+      } finally {
+        await provider.close();
+        cleanupEnvironment(testEnv);
+      }
+    });
+  }
 });
 
 describe("Codex direct-skill E2E", () => {
+  it("uses the installed plugin review skill without running $cc:setup first", async (t) => {
+    if (!codexAvailable()) {
+      t.skip("codex CLI is not available in this environment");
+      return;
+    }
+
+    const testEnv = createEnvironment();
+    const workspaceDir = path.join(testEnv.rootDir, "installed-review-workspace");
+    fs.mkdirSync(workspaceDir, { recursive: true });
+    setupGitWorkspace(workspaceDir);
+    fs.writeFileSync(
+      path.join(workspaceDir, "app.js"),
+      "export function value() {\n  return 4;\n}\n",
+      "utf8"
+    );
+
+    installPlugin(testEnv);
+
+    const userRequest = "$cc:review --wait --scope working-tree --model haiku";
+    const provider = startDirectSkillProvider({
+      userRequest,
+      expectedNeedles: ["Claude Code Review"],
+      shellCommands: [
+        `node ${JSON.stringify(COMPANION_SCRIPT)} review --view-state on-success --scope working-tree --model haiku`,
+      ],
+      cwd: workspaceDir,
+    });
+    testEnv.providerPort = await provider.listen();
+    writeConfigToml(testEnv, testEnv.providerPort);
+
+    try {
+      const execResult = await runCodexExec(testEnv, userRequest, { cwd: workspaceDir });
+
+      assert.equal(execResult.status, 0, execResult.stderr || execResult.stdout);
+      const finalMessage = fs.readFileSync(testEnv.outputFile, "utf8");
+      assert.match(finalMessage, /Claude Code Review/);
+
+      const claudeInvocations = readClaudeInvocations(testEnv.claudeLogFile);
+      assert.ok(
+        claudeInvocations.some(
+          (entry) => entry.args.includes("--model") && entry.args.includes("claude-haiku-4-5")
+        ),
+        "installed plugin review should forward the requested model alias to Claude without running setup first"
+      );
+    } finally {
+      await provider.close();
+      cleanupEnvironment(testEnv);
+    }
+  });
+
   it("routes $cc:review --wait through the companion review command with forwarded scope and model", async (t) => {
     if (!codexAvailable()) {
       t.skip("codex CLI is not available in this environment");
@@ -1105,7 +1441,7 @@ describe("Codex direct-skill E2E", () => {
       cwd: workspaceDir,
     });
     testEnv.providerPort = await provider.listen();
-    installGlobalRescueAgent(testEnv);
+    installHooks(testEnv);
     writeConfigToml(testEnv, testEnv.providerPort);
 
     try {
@@ -1156,7 +1492,7 @@ describe("Codex direct-skill E2E", () => {
       cwd: workspaceDir,
     });
     testEnv.providerPort = await provider.listen();
-    installGlobalRescueAgent(testEnv);
+    installHooks(testEnv);
     writeConfigToml(testEnv, testEnv.providerPort);
 
     try {
@@ -1201,7 +1537,7 @@ describe("Codex direct-skill E2E", () => {
       ],
     });
     testEnv.providerPort = await provider.listen();
-    installGlobalRescueAgent(testEnv);
+    installHooks(testEnv);
     writeConfigToml(testEnv, testEnv.providerPort);
 
     try {
@@ -1217,6 +1553,45 @@ describe("Codex direct-skill E2E", () => {
         finalMessage,
         new RegExp(`Enabled the stop-time review gate for ${PROJECT_ROOT.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`)
       );
+    } finally {
+      await provider.close();
+      cleanupEnvironment(testEnv);
+    }
+  });
+
+  it("auto-installs hooks during $cc:setup when the json probe reports they are missing", async (t) => {
+    if (!codexAvailable()) {
+      t.skip("codex CLI is not available in this environment");
+      return;
+    }
+
+    const testEnv = createEnvironment();
+    const userRequest = "$cc:setup";
+    const provider = startDirectSkillProvider({
+      userRequest,
+      expectedNeedles: ["Claude Code Setup"],
+      shellCommands: [
+        `node ${JSON.stringify(COMPANION_SCRIPT)} setup --json`,
+        `node ${JSON.stringify(INSTALL_HOOKS_SCRIPT)}`,
+        `node ${JSON.stringify(COMPANION_SCRIPT)} setup`,
+      ],
+    });
+    testEnv.providerPort = await provider.listen();
+    writeConfigToml(testEnv, testEnv.providerPort);
+
+    try {
+      const execResult = await runCodexExec(
+        testEnv,
+        buildSkillPrompt("cc:setup", SETUP_SKILL_PATH, userRequest)
+      );
+
+      assert.equal(execResult.status, 0, execResult.stderr || execResult.stdout);
+      const finalMessage = fs.readFileSync(testEnv.outputFile, "utf8");
+      assert.match(finalMessage, /Status: ready/i);
+      assert.match(finalMessage, /hooks: Codex hooks installed/i);
+
+      const hooksFile = path.join(testEnv.codexHome, "hooks.json");
+      assert.ok(fs.existsSync(hooksFile), "setup should install hooks when they are missing");
     } finally {
       await provider.close();
       cleanupEnvironment(testEnv);

@@ -16,9 +16,12 @@
  */
 
 import fs from "node:fs";
+import path from "node:path";
 import process from "node:process";
+import { fileURLToPath } from "node:url";
 
 import { readHookInput } from "./lib/hook-input.mjs";
+import { cleanupAfterOfficialUninstall } from "./lib/plugin-install-guard.mjs";
 import { terminateProcessTree, validateProcessIdentity } from "../scripts/lib/process.mjs";
 import {
   ACTIVE_JOB_STATUSES,
@@ -34,6 +37,7 @@ import { resolveWorkspaceRoot } from "../scripts/lib/workspace.mjs";
 export { SESSION_ID_ENV };
 const PLUGIN_DATA_ENV = "CLAUDE_PLUGIN_DATA";
 const SKIP_INTERACTIVE_HOOKS_ENV = "CLAUDE_COMPANION_SKIP_INTERACTIVE_HOOKS";
+const ROOT_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 function shellEscape(value) {
   return `'${String(value).replace(/'/g, `'\"'\"'`)}'`;
@@ -157,6 +161,9 @@ function handleSessionEnd(input) {
 
 async function main() {
   const input = readHookInput();
+  if (cleanupAfterOfficialUninstall(ROOT_DIR)) {
+    return;
+  }
   const eventName = process.argv[2] ?? input.hook_event_name ?? "";
 
   if (eventName === "SessionStart" || !eventName) {

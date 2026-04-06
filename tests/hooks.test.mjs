@@ -32,6 +32,7 @@ const UNREAD_HOOK = path.join(
   "hooks",
   "unread-result-hook.mjs"
 );
+const PLUGIN_CONFIG_BLOCK = '[plugins."cc@local-plugins"]\nenabled = true\n';
 
 function createFakeClaudeBinary(binDir) {
   const claudePath = path.join(binDir, "claude");
@@ -142,6 +143,11 @@ function createHookEnvironment(options = {}) {
   fs.mkdirSync(homeDir, { recursive: true });
   fs.mkdirSync(binDir, { recursive: true });
   fs.mkdirSync(workspaceDir, { recursive: true });
+  fs.mkdirSync(path.join(homeDir, ".codex", "plugins", "cache", "local-plugins", "cc", "local"), {
+    recursive: true,
+  });
+  fs.mkdirSync(path.join(homeDir, ".codex"), { recursive: true });
+  fs.writeFileSync(path.join(homeDir, ".codex", "config.toml"), PLUGIN_CONFIG_BLOCK, "utf8");
   if (createClaude) {
     createFakeClaudeBinary(binDir);
   }

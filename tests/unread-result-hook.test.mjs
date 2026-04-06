@@ -15,6 +15,7 @@ const PROJECT_ROOT = path.resolve(
   fileURLToPath(new URL("../", import.meta.url))
 );
 const HOOK_SCRIPT = path.join(PROJECT_ROOT, "hooks", "unread-result-hook.mjs");
+const PLUGIN_CONFIG_BLOCK = '[plugins."cc@local-plugins"]\nenabled = true\n';
 
 function createEnv() {
   const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "claude-unread-hook-"));
@@ -22,6 +23,11 @@ function createEnv() {
   const workspaceDir = path.join(rootDir, "workspace");
   fs.mkdirSync(homeDir, { recursive: true });
   fs.mkdirSync(workspaceDir, { recursive: true });
+  fs.mkdirSync(path.join(homeDir, ".codex", "plugins", "cache", "local-plugins", "cc", "local"), {
+    recursive: true,
+  });
+  fs.mkdirSync(path.join(homeDir, ".codex"), { recursive: true });
+  fs.writeFileSync(path.join(homeDir, ".codex", "config.toml"), PLUGIN_CONFIG_BLOCK, "utf8");
   return { rootDir, homeDir, workspaceDir };
 }
 
@@ -209,6 +215,159 @@ test("does not record a turn baseline when the review gate is disabled", () => {
 
     assert.equal(output, "");
     assert.ok(!fs.existsSync(turnBaselinePath(testEnv, "session-a")));
+  } finally {
+    cleanupEnv(testEnv);
+  }
+});
+
+test("does not self-clean managed hooks when the plugin stays enabled but the cache is missing", () => {
+  const testEnv = createEnv();
+  try {
+    const hooksPath = path.join(testEnv.homeDir, ".codex", "hooks.json");
+    fs.writeFileSync(
+      hooksPath,
+      JSON.stringify(
+        {
+          hooks: {
+            UserPromptSubmit: [
+              {
+                matcher: "*",
+                hooks: [
+                  {
+                    type: "command",
+                    command: `node "${path.join(PROJECT_ROOT, "hooks", "unread-result-hook.mjs")}"`,
+                  },
+                ],
+              },
+            ],
+          },
+        },
+        null,
+        2
+      ) + "\n",
+      "utf8"
+    );
+    fs.rmSync(
+      path.join(testEnv.homeDir, ".codex", "plugins", "cache", "local-plugins", "cc", "local"),
+      { recursive: true, force: true }
+    );
+
+    const output = runHook(testEnv, {
+      hook_event_name: "UserPromptSubmit",
+      cwd: testEnv.workspaceDir,
+      session_id: "session-a",
+      prompt: "continue working",
+    });
+
+    assert.equal(output, "");
+    assert.ok(
+      fs.existsSync(hooksPath),
+      "cache loss alone should not trigger managed hook cleanup"
+    );
+  } finally {
+    cleanupEnv(testEnv);
+  }
+});
+
+test("does not self-clean managed hooks when config.toml is missing", () => {
+  const testEnv = createEnv();
+  try {
+    const hooksPath = path.join(testEnv.homeDir, ".codex", "hooks.json");
+    fs.writeFileSync(
+      hooksPath,
+      JSON.stringify(
+        {
+          hooks: {
+            UserPromptSubmit: [
+              {
+                matcher: "*",
+                hooks: [
+                  {
+                    type: "command",
+                    command: `node "${path.join(PROJECT_ROOT, "hooks", "unread-result-hook.mjs")}"`,
+                  },
+                ],
+              },
+            ],
+          },
+        },
+        null,
+        2
+      ) + "\n",
+      "utf8"
+    );
+    fs.rmSync(path.join(testEnv.homeDir, ".codex", "config.toml"), { force: true });
+    fs.rmSync(
+      path.join(testEnv.homeDir, ".codex", "plugins", "cache", "local-plugins", "cc", "local"),
+      { recursive: true, force: true }
+    );
+
+    const output = runHook(testEnv, {
+      hook_event_name: "UserPromptSubmit",
+      cwd: testEnv.workspaceDir,
+      session_id: "session-a",
+      prompt: "continue working",
+    });
+
+    assert.equal(output, "");
+    assert.ok(
+      fs.existsSync(hooksPath),
+      "missing config alone should not trigger managed hook cleanup"
+    );
+  } finally {
+    cleanupEnv(testEnv);
+  }
+});
+
+test("does not self-clean managed hooks when config.toml is malformed", () => {
+  const testEnv = createEnv();
+  try {
+    const hooksPath = path.join(testEnv.homeDir, ".codex", "hooks.json");
+    fs.writeFileSync(
+      hooksPath,
+      JSON.stringify(
+        {
+          hooks: {
+            UserPromptSubmit: [
+              {
+                matcher: "*",
+                hooks: [
+                  {
+                    type: "command",
+                    command: `node "${path.join(PROJECT_ROOT, "hooks", "unread-result-hook.mjs")}"`,
+                  },
+                ],
+              },
+            ],
+          },
+        },
+        null,
+        2
+      ) + "\n",
+      "utf8"
+    );
+    fs.writeFileSync(
+      path.join(testEnv.homeDir, ".codex", "config.toml"),
+      "this is not the plugin config we are looking for\n",
+      "utf8"
+    );
+    fs.rmSync(
+      path.join(testEnv.homeDir, ".codex", "plugins", "cache", "local-plugins", "cc", "local"),
+      { recursive: true, force: true }
+    );
+
+    const output = runHook(testEnv, {
+      hook_event_name: "UserPromptSubmit",
+      cwd: testEnv.workspaceDir,
+      session_id: "session-a",
+      prompt: "continue working",
+    });
+
+    assert.equal(output, "");
+    assert.ok(
+      fs.existsSync(hooksPath),
+      "malformed config alone should not trigger managed hook cleanup"
+    );
   } finally {
     cleanupEnv(testEnv);
   }

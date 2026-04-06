@@ -142,7 +142,6 @@ describe("renderSetupReport", () => {
     claude: { detail: "installed" },
     auth: { detail: "authenticated" },
     hooks: { detail: "Codex hooks installed" },
-    rescueAgent: { detail: 'global "cc-rescue" agent installed' },
     reviewGateEnabled: false,
     actionsTaken: [],
     nextSteps: [],
@@ -164,7 +163,6 @@ describe("renderSetupReport", () => {
     assert.ok(output.includes("- node: v20.0.0"));
     assert.ok(output.includes("- auth: authenticated"));
     assert.ok(output.includes("- hooks: Codex hooks installed"));
-    assert.ok(output.includes('- rescue agent: global "cc-rescue" agent installed'));
   });
 
   it("shows review gate status", () => {
