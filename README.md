@@ -57,7 +57,9 @@ Both install flows:
 - ask Codex app-server to run `plugin/install` when that API is available
 - fall back to config-based activation on older or unsupported Codex builds
 
-Outside the plugin directory, the only managed state is the hook entries in `~/.codex/hooks.json`. This plugin no longer installs a global rescue agent under `~/.codex/agents`.
+When Codex's official `plugin/install` API is unavailable, the installer also writes fallback `cc-*` wrappers into `~/.codex/skills` and `~/.codex/prompts` so `$cc:*` commands remain discoverable.
+
+Outside the plugin directory, the managed state is the hook entries in `~/.codex/hooks.json`, plus fallback `cc-*` wrappers in `~/.codex/skills` and `~/.codex/prompts` when the installer has to use the older compatibility path. This plugin no longer installs a global rescue agent under `~/.codex/agents`.
 
 ### npx
 
@@ -121,6 +123,8 @@ If Claude Code is already installed and authenticated, the other `$cc:*` skills 
 - auto-install missing hooks
 - diagnose missing auth
 - enable or disable the review gate
+
+If the plugin was installed through another marketplace path or copied into Codex without running this installer, run `$cc:setup` once so it can install the managed hooks.
 
 After install, you should see:
 

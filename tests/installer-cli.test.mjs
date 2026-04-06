@@ -572,9 +572,13 @@ describe("installer-cli", () => {
     const marketplaceFile = path.join(homeDir, ".agents", "plugins", "marketplace.json");
     const configFile = path.join(homeDir, ".codex", "config.toml");
     const hooksFile = path.join(homeDir, ".codex", "hooks.json");
+    const fallbackSkillPath = path.join(homeDir, ".codex", "skills", "cc-review", "SKILL.md");
+    const fallbackPromptPath = path.join(homeDir, ".codex", "prompts", "cc-review.md");
 
     assert.ok(fs.existsSync(path.join(installDir, "scripts", "installer-cli.mjs")));
     assert.ok(fs.existsSync(path.join(cacheDir, "skills", "review", "SKILL.md")));
+    assert.ok(!fs.existsSync(fallbackSkillPath));
+    assert.ok(!fs.existsSync(fallbackPromptPath));
 
     const marketplace = JSON.parse(fs.readFileSync(marketplaceFile, "utf8"));
     assert.equal(marketplace.plugins[0].name, "cc");
@@ -628,6 +632,8 @@ describe("installer-cli", () => {
 
     const installDir = path.join(homeDir, ".codex", "plugins", "cc");
     const cacheDir = path.join(homeDir, ".codex", "plugins", "cache", "local-plugins", "cc", "local");
+    const fallbackSkillPath = path.join(homeDir, ".codex", "skills", "cc-review", "SKILL.md");
+    const fallbackPromptPath = path.join(homeDir, ".codex", "prompts", "cc-review.md");
     const configFile = path.join(homeDir, ".codex", "config.toml");
     const hooksFile = path.join(homeDir, ".codex", "hooks.json");
     const config = fs.readFileSync(configFile, "utf8");
@@ -637,7 +643,11 @@ describe("installer-cli", () => {
     assert.ok(fs.existsSync(hooksFile), "fallback install should still install managed hooks");
     assert.match(config, /\[plugins\."cc@local-plugins"\]/);
     assert.match(config, /enabled = true/);
-    assert.ok(!fs.existsSync(cacheDir), "fallback install should not depend on the Codex cache path");
+    assert.ok(!fs.existsSync(cacheDir), "fallback install should still avoid relying on the Codex cache path");
+    assert.ok(fs.existsSync(fallbackSkillPath), "fallback install should expose a Codex-native skill wrapper");
+    assert.ok(fs.existsSync(fallbackPromptPath), "fallback install should expose a matching prompt wrapper");
+    assert.match(fs.readFileSync(fallbackSkillPath, "utf8"), /^---\nname: cc:review\n/m);
+    assert.match(fs.readFileSync(fallbackPromptPath, "utf8"), /Use the \$cc:review skill/);
     assert.ok(
       requests.some((request) => request.method === "plugin/install"),
       "fallback install should still try plugin/install first"
@@ -654,6 +664,7 @@ describe("installer-cli", () => {
     const result = runInstaller("install", homeDir, sourceRoot, fakeCodex.env);
 
     const installDir = path.join(homeDir, ".codex", "plugins", "cc");
+    const fallbackSkillPath = path.join(homeDir, ".codex", "skills", "cc-review", "SKILL.md");
     const configFile = path.join(homeDir, ".codex", "config.toml");
     const hooksFile = path.join(homeDir, ".codex", "hooks.json");
     const config = fs.readFileSync(configFile, "utf8");
@@ -663,12 +674,37 @@ describe("installer-cli", () => {
     assert.ok(fs.existsSync(hooksFile), "timeout fallback install should still install managed hooks");
     assert.match(config, /\[plugins\."cc@local-plugins"\]/);
     assert.match(config, /enabled = true/);
+    assert.ok(fs.existsSync(fallbackSkillPath), "timeout fallback should also install skill wrappers");
     assert.ok(
       requests.some((request) => request.method === "plugin/install"),
       "timeout fallback install should still try plugin/install first"
     );
     assert.match(result.stderr, /timed out waiting for plugin\/install/i);
     assert.match(result.stderr, /config fallback/i);
+  });
+
+  it("removes stale fallback skill wrappers when official plugin/install succeeds", () => {
+    const homeDir = makeTempHome();
+    const sourceRoot = makeTempSource();
+    const fakeCodex = createFakeCodex(homeDir);
+    copyFixture(sourceRoot);
+
+    const staleSkillPath = path.join(homeDir, ".codex", "skills", "cc-review", "SKILL.md");
+    const stalePromptPath = path.join(homeDir, ".codex", "prompts", "cc-review.md");
+    const unrelatedSkillPath = path.join(homeDir, ".codex", "skills", "keep-me", "SKILL.md");
+
+    fs.mkdirSync(path.dirname(staleSkillPath), { recursive: true });
+    fs.writeFileSync(staleSkillPath, "stale wrapper\n", "utf8");
+    fs.mkdirSync(path.dirname(stalePromptPath), { recursive: true });
+    fs.writeFileSync(stalePromptPath, "stale prompt\n", "utf8");
+    fs.mkdirSync(path.dirname(unrelatedSkillPath), { recursive: true });
+    fs.writeFileSync(unrelatedSkillPath, "leave me alone\n", "utf8");
+
+    runInstaller("install", homeDir, sourceRoot, fakeCodex.env);
+
+    assert.ok(!fs.existsSync(staleSkillPath));
+    assert.ok(!fs.existsSync(stalePromptPath));
+    assert.ok(fs.existsSync(unrelatedSkillPath), "official install should not remove unrelated user skills");
   });
 
   it("uninstalls cleanly while preserving unrelated user config", () => {
@@ -783,6 +819,13 @@ describe("installer-cli", () => {
     const cacheDir = path.join(codexDir, "plugins", "cache", "local-plugins", "cc", "local");
     const configFile = path.join(codexDir, "config.toml");
     const hooksFile = path.join(codexDir, "hooks.json");
+    const fallbackSkillPath = path.join(codexDir, "skills", "cc-review", "SKILL.md");
+    const fallbackPromptPath = path.join(codexDir, "prompts", "cc-review.md");
+
+    fs.mkdirSync(path.dirname(fallbackSkillPath), { recursive: true });
+    fs.writeFileSync(fallbackSkillPath, "stale fallback skill\n", "utf8");
+    fs.mkdirSync(path.dirname(fallbackPromptPath), { recursive: true });
+    fs.writeFileSync(fallbackPromptPath, "stale fallback prompt\n", "utf8");
 
     fs.writeFileSync(
       configFile,
@@ -816,6 +859,8 @@ describe("installer-cli", () => {
 
     const cleanedConfig = fs.readFileSync(configFile, "utf8");
     assert.ok(!fs.existsSync(hooksFile), "cleanup should remove managed global hooks once the plugin is uninstalled");
+    assert.ok(!fs.existsSync(fallbackSkillPath), "cleanup should also remove managed fallback skill wrappers");
+    assert.ok(!fs.existsSync(fallbackPromptPath), "cleanup should also remove managed fallback prompt wrappers");
 
     const marketplace = JSON.parse(
       fs.readFileSync(path.join(homeDir, ".agents", "plugins", "marketplace.json"), "utf8")

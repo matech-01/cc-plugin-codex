@@ -22,6 +22,17 @@ const CODEX_PLUGIN_CACHE_DIR = path.join(
   PLUGIN_NAME,
   "local"
 );
+const CODEX_SKILLS_DIR = path.join(CODEX_HOME, "skills");
+const CODEX_PROMPTS_DIR = path.join(CODEX_HOME, "prompts");
+const MANAGED_WRAPPER_SKILLS = [
+  "review",
+  "adversarial-review",
+  "rescue",
+  "status",
+  "result",
+  "cancel",
+  "setup",
+];
 const PLUGIN_SECTION_HEADER_PATTERN =
   /^\[\s*plugins\s*\.\s*["']?cc@local-plugins["']?\s*\]\s*(?:#.*)?$/i;
 const PLUGIN_ENABLED_PATTERN = /^enabled\s*=\s*true\s*(?:#.*)?$/i;
@@ -42,6 +53,15 @@ function writeText(filePath, content) {
 
 function normalizePathSlashes(value) {
   return value.replace(/\\/g, "/");
+}
+
+function removeIfEmpty(dirPath) {
+  if (!fs.existsSync(dirPath)) {
+    return;
+  }
+  if (fs.readdirSync(dirPath).length === 0) {
+    fs.rmdirSync(dirPath);
+  }
 }
 
 function readConfigFile() {
@@ -87,6 +107,25 @@ export function removeManagedHooks(pluginRoot) {
   }
 
   writeText(CODEX_HOOKS_FILE, `${JSON.stringify({ hooks: nextHooks }, null, 2)}\n`);
+}
+
+function formatWrapperName(skillName) {
+  return `${PLUGIN_NAME}-${skillName}`;
+}
+
+export function removeManagedSkillWrappers() {
+  for (const skillName of MANAGED_WRAPPER_SKILLS) {
+    fs.rmSync(path.join(CODEX_SKILLS_DIR, formatWrapperName(skillName)), {
+      recursive: true,
+      force: true,
+    });
+    fs.rmSync(path.join(CODEX_PROMPTS_DIR, `${formatWrapperName(skillName)}.md`), {
+      force: true,
+    });
+  }
+
+  removeIfEmpty(CODEX_SKILLS_DIR);
+  removeIfEmpty(CODEX_PROMPTS_DIR);
 }
 
 export function getManagedPluginSignals() {
@@ -174,6 +213,7 @@ export function isCodexPluginActive() {
 
 export function cleanupManagedGlobalIntegrations(pluginRoot) {
   removeManagedHooks(pluginRoot);
+  removeManagedSkillWrappers();
 }
 
 export function resolveManagedMarketplacePluginPath(pluginRoot) {
