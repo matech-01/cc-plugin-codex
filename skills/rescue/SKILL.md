@@ -5,13 +5,12 @@ description: 'Delegate a substantial diagnosis, implementation, or follow-up tas
 
 # Claude Code Rescue
 
-Always hand this skill off through the globally registered `cc-rescue` subagent.
+By default, hand this skill off through Codex's built-in `default` subagent.
 Do not answer the request inline in the main Codex thread.
-Spawn exactly one `cc-rescue` subagent whose only job is to run one companion `task` command and return that stdout unchanged.
+Spawn exactly one rescue forwarding subagent whose only job is to run one companion `task` command and return that stdout unchanged.
 Foreground rescue responses must be that subagent's output verbatim.
 
 Use this skill when the user wants Claude Code to investigate, implement, or continue substantial work in this repository.
-The global `cc-rescue` agent is installed by `node "<plugin-root>/scripts/install-hooks.mjs"` and registered in `~/.codex/config.toml`.
 
 Resolve `<plugin-root>` as two directories above this skill file. The companion entrypoint is:
 `node "<plugin-root>/scripts/claude-companion.mjs" task ...`
@@ -30,7 +29,7 @@ Main-thread routing rules:
 - Treat `--model`, `--effort`, `--resume`, `--resume-last`, `--fresh`, and `--prompt-file` as runtime or routing controls, not task text.
 - If the user task text itself begins with a slash command such as `/simplify`, `/fix`, or `/review`, treat that slash command as literal Claude Code task text to be forwarded unchanged. Do not execute or reinterpret it in the parent Codex thread.
 - `--model` selects the Claude model for the companion `task` command only. It does not select the Codex subagent model.
-- If the user explicitly passed `--background`, run the `cc-rescue` subagent in the background.
+- If the user explicitly passed `--background`, run the rescue subagent in the background.
 - If the user explicitly passed `--wait`, run in the foreground.
 - If neither flag is present and the rescue request is small, clearly bounded, or likely to finish quickly, prefer foreground.
 - If neither flag is present and the request looks complicated, open-ended, multi-step, or likely to keep Claude Code running for a while, prefer background execution for the subagent.
@@ -52,8 +51,9 @@ Main-thread routing rules:
 - Do not inspect the repo, do the task yourself, poll job status, or summarize the result in the same turn.
 
 Subagent launch:
-- Use Codex's `spawn_agent` tool with `agent_type: "cc-rescue"`.
-- Do not silently substitute the built-in `worker` role. If `cc-rescue` is unavailable, stop and direct the user to `$cc:setup` or `node "<plugin-root>/scripts/install-hooks.mjs"`.
+- By default, use Codex's `spawn_agent` tool with `agent_type: "default"`.
+- If a legacy request still includes `--builtin-agent`, treat it as a compatibility alias for the default built-in path. It should not change behavior.
+- The built-in rescue path must set `model: "gpt-5.4"` and `reasoning_effort: "medium"` on `spawn_agent` so the transient forwarding child stays cheap and predictable.
 - Remove `--background` and `--wait` before spawning the subagent. Those flags control only whether the main thread waits on the subagent.
 - Pass only the routing and task arguments that actually belong to `claude-companion.mjs task`.
 - If the free-text task begins with `/`, preserve it verbatim in the spawned subagent request. Do not strip the slash or rewrite it into a local Codex command.
@@ -63,10 +63,35 @@ Subagent launch:
   - Foreground rescue must add `--view-state on-success`
   - Background rescue must add `--view-state defer`
 - Any user-supplied `--model` flag is for the Claude companion only and must be forwarded unchanged to `task`.
+- For the built-in rescue path, the parent thread owns prompt shaping. The built-in child should stay a pure executor.
+- If the built-in rescue request is vague, chatty, or a follow-up, the parent may tighten only the task text before composing the exact companion command.
+- Use the `task-prompt-shaping` internal rules as guidance for that parent-side tightening:
+  - preserve user intent and add no new repo facts
+  - prefer a short delta instruction for resume follow-ups
+  - when helpful, use compact blocks such as `<task>`, `<output_contract>`, and `<default_follow_through_policy>`
+  - do not add more words than value for already-clear requests
+- Parent-side shaping should be conservative and specific:
+  - If the request is already concrete, keep it literal.
+  - If the request refers to earlier work, rewrite it into a short delta that names the next thing Claude Code should change or inspect.
+  - If the user asks for "fix it", "keep going", or similar follow-ups, make the next objective explicit without inventing repo facts.
+  - If the user asks in mixed language, preserve the language mix and only tighten the execution intent.
+  - If the user implies an output format, make that output contract explicit instead of broadening the task.
+- For the built-in rescue path, parent-side shaping must happen before the command is handed to the child. The child must not do an additional interpretation pass.
+- If the user is not satisfied with a built-in rescue result, the parent should treat the next rescue request as a follow-up and prefer `--resume` or `--resume-last` with a short delta instruction when a resumable Claude Code session exists.
+- The built-in rescue path must use a compact strict forwarding message. It must:
+  - identify the child as a transient forwarding worker for Claude Code rescue
+  - include exactly one shell command to run
+  - tell the child to return only that command's stdout text exactly, with no preamble, summary, code fence, trimming, normalization, or punctuation changes
+  - tell the child not to inspect the repository, read files, grep, or do the task directly
+  - tell the child not to reinterpret routing flags that were already resolved by the parent
+  - tell the child to copy the resolved rescue task text byte-for-byte into that exact command after parent-side routing flags are removed
+  - explicitly forbid appending terminal punctuation, adding quotes, dropping prefixes such as `completed:`, or stripping leading slash commands such as `/simplify`
+  - include one short exact-output example such as `completed:/simplify make the output compact`
+  - say that auth/setup failures from the companion must be returned unchanged
 
 Execution:
-- Foreground: spawn the `cc-rescue` subagent, wait for it to finish, and return its stdout.
-- Background: spawn the `cc-rescue` subagent without waiting for it in this turn. The subagent still runs the companion `task` command in the foreground inside its own thread. Background here describes only the parent thread's wait behavior.
+- Foreground: spawn the rescue subagent, wait for it to finish, and return its stdout.
+- Background: spawn the rescue subagent without waiting for it in this turn. The subagent still runs the companion `task` command in the foreground inside its own thread. Background here describes only the parent thread's wait behavior.
 
 Output:
 - Foreground: return the subagent's companion stdout exactly as-is. Do not paraphrase, summarize, or add commentary before or after it.

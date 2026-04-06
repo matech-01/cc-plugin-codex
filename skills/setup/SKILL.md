@@ -19,8 +19,9 @@ Workflow:
 - If it reports that Claude Code is unavailable and `npm` is available, ask whether to install Claude Code now.
 - If the user agrees, run `npm install -g @anthropic-ai/claude-code` and rerun setup.
 - If Claude Code is already installed or `npm` is unavailable, do not ask about installation.
-- If setup reports missing hooks or a missing `cc-rescue` agent, direct the user to:
+- If setup reports missing hooks, run:
   `node "<plugin-root>/scripts/install-hooks.mjs"`
+- After hook installation, rerun the final setup command so the user sees the repaired state immediately.
 - After the decision flow is complete, run the final user-facing command without `--json`:
   `node "<plugin-root>/scripts/claude-companion.mjs" setup $ARGUMENTS`
 

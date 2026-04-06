@@ -52,7 +52,6 @@ function copyInstallFixture(pluginRoot) {
     recursive: true,
   });
   fs.mkdirSync(path.join(pluginRoot, "scripts"), { recursive: true });
-  fs.mkdirSync(path.join(pluginRoot, "agents"), { recursive: true });
   fs.cpSync(
     path.join(PROJECT_ROOT, "scripts", "lib"),
     path.join(pluginRoot, "scripts", "lib"),
@@ -66,10 +65,6 @@ function copyInstallFixture(pluginRoot) {
     path.join(PROJECT_ROOT, "scripts", "claude-companion.mjs"),
     path.join(pluginRoot, "scripts", "claude-companion.mjs")
   );
-  fs.copyFileSync(
-    path.join(PROJECT_ROOT, "agents", "cc-rescue.toml"),
-    path.join(pluginRoot, "agents", "cc-rescue.toml")
-  );
 }
 
 const tempHomes = [];
@@ -82,19 +77,15 @@ afterEach(() => {
 });
 
 describe("install-hooks.mjs", () => {
-  it("installs hooks, the global rescue agent, and agent config into an empty Codex home", () => {
+  it("installs hooks into an empty Codex home", () => {
     const homeDir = makeTempHome();
     tempHomes.push(homeDir);
 
     const result = runInstallHooks(homeDir);
 
     const hooksFile = path.join(homeDir, ".codex", "hooks.json");
-    const configFile = path.join(homeDir, ".codex", "config.toml");
-    const agentFile = path.join(homeDir, ".codex", "agents", "cc-rescue.toml");
 
     assert.ok(fs.existsSync(hooksFile));
-    assert.ok(fs.existsSync(configFile));
-    assert.ok(fs.existsSync(agentFile));
 
     const hooks = JSON.parse(fs.readFileSync(hooksFile, "utf8"));
     const sessionStartCommand =
@@ -110,45 +101,7 @@ describe("install-hooks.mjs", () => {
     const userPromptCommand =
       hooks.hooks.UserPromptSubmit[0].hooks[0].command;
     assert.ok(userPromptCommand.includes(`${PROJECT_ROOT}/hooks/unread-result-hook.mjs`));
-
-    const config = fs.readFileSync(configFile, "utf8");
-    assert.match(config, /\[agents\."cc-rescue"\]/);
-    assert.match(config, /config_file = "agents\/cc-rescue\.toml"/);
-
-    const agent = fs.readFileSync(agentFile, "utf8");
-    assert.ok(agent.includes(`${PROJECT_ROOT}/scripts/claude-companion.mjs`));
-    assert.ok(agent.includes(`${PROJECT_ROOT}/internal-skills/cli-runtime/SKILL.md`));
-    assert.ok(result.stdout.includes('Global "cc-rescue" agent is installed and registered.'));
-  });
-
-  it("backs up an unmanaged existing cc-rescue agent before overwriting it", () => {
-    const homeDir = makeTempHome();
-    tempHomes.push(homeDir);
-
-    const codexDir = path.join(homeDir, ".codex");
-    const agentsDir = path.join(codexDir, "agents");
-    fs.mkdirSync(agentsDir, { recursive: true });
-    fs.writeFileSync(
-      path.join(agentsDir, "cc-rescue.toml"),
-      'developer_instructions = "custom"\n',
-      "utf8"
-    );
-
-    runInstallHooks(homeDir);
-
-    const backups = fs
-      .readdirSync(agentsDir)
-      .filter((name) => name.startsWith("cc-rescue.toml.bak-"));
-    assert.equal(backups.length, 1);
-
-    const backupContent = fs.readFileSync(path.join(agentsDir, backups[0]), "utf8");
-    assert.equal(backupContent, 'developer_instructions = "custom"\n');
-
-    const installedAgent = fs.readFileSync(
-      path.join(agentsDir, "cc-rescue.toml"),
-      "utf8"
-    );
-    assert.match(installedAgent, /Managed by cc-plugin-codex/);
+    assert.ok(result.stdout.includes("Codex hooks installation complete."));
   });
 
   it("does not duplicate semantically identical hook commands when quoting changes", () => {
@@ -210,6 +163,16 @@ describe("install-hooks.mjs", () => {
       /node '\S.*\$\(touch injected-marker\).*session-lifecycle-hook\.mjs'/
     );
 
+    fs.mkdirSync(
+      path.join(homeDir, ".codex", "plugins", "cache", "local-plugins", "cc", "local"),
+      { recursive: true }
+    );
+    fs.writeFileSync(
+      path.join(homeDir, ".codex", "config.toml"),
+      '[plugins."cc@local-plugins"]\nenabled = true\n',
+      "utf8"
+    );
+
     const runResult = spawnSync("sh", ["-lc", sessionStartCommand], {
       cwd: pluginRoot,
       env: {
@@ -226,14 +189,6 @@ describe("install-hooks.mjs", () => {
       "hook command should not execute command substitution from the plugin path"
     );
 
-    const agent = fs.readFileSync(
-      path.join(homeDir, ".codex", "agents", "cc-rescue.toml"),
-      "utf8"
-    );
-    assert.match(
-      agent,
-      /node '.*\$\(touch injected-marker\).*\/scripts\/claude-companion\.mjs' task/
-    );
   });
 
   it("rejects hook templates that resolve outside the plugin root", () => {

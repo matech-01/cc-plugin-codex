@@ -99,7 +99,6 @@ const DEFAULT_STATUS_POLL_INTERVAL_MS = 2000;
 const STOP_REVIEW_TASK_MARKER = "Run a stop-gate review of the previous Claude turn.";
 const CODEX_DIR = resolveCodexHome();
 const CODEX_CONFIG_TOML = path.join(CODEX_DIR, "config.toml");
-const CODEX_RESCUE_AGENT_FILE = path.join(CODEX_DIR, "agents", "cc-rescue.toml");
 
 // ---------------------------------------------------------------------------
 // Usage
@@ -247,42 +246,6 @@ function checkHooksStatus() {
   return { installed: false, detail: "hooks.json exists but Codex hooks not found — run install-hooks.mjs" };
 }
 
-function checkRescueAgentStatus() {
-  const agentFileExists = fs.existsSync(CODEX_RESCUE_AGENT_FILE);
-  const configContent = fs.existsSync(CODEX_CONFIG_TOML)
-    ? fs.readFileSync(CODEX_CONFIG_TOML, "utf8")
-    : "";
-  const registered = /^\s*\[agents\.(?:"cc-rescue"|cc-rescue)\]\s*$/m.test(
-    configContent
-  );
-
-  if (agentFileExists && registered) {
-    return {
-      installed: true,
-      detail: 'global "cc-rescue" agent installed',
-    };
-  }
-
-  if (!agentFileExists && !registered) {
-    return {
-      installed: false,
-      detail: 'global "cc-rescue" agent missing — run install-hooks.mjs',
-    };
-  }
-
-  if (!agentFileExists) {
-    return {
-      installed: false,
-      detail: 'global "cc-rescue" agent file missing — rerun install-hooks.mjs',
-    };
-  }
-
-  return {
-    installed: false,
-    detail: 'global "cc-rescue" agent not registered in config.toml — rerun install-hooks.mjs',
-  };
-}
-
 function ensureClaudeReady(cwd) {
   const authStatus = getClaudeAuthStatus(cwd);
   if (!authStatus.available) {
@@ -303,7 +266,6 @@ function buildSetupReport(cwd, actionsTaken = []) {
   const claudeStatus = getClaudeAvailability(cwd);
   const authStatus = getClaudeAuthStatus(cwd);
   const hooksStatus = checkHooksStatus();
-  const rescueAgentStatus = checkRescueAgentStatus();
   const config = getConfig(workspaceRoot);
 
   const nextSteps = [];
@@ -313,8 +275,8 @@ function buildSetupReport(cwd, actionsTaken = []) {
   if (claudeStatus.available && !authStatus.loggedIn) {
     nextSteps.push("Run `claude auth login`.");
   }
-  if (!hooksStatus.installed || !rescueAgentStatus.installed) {
-    nextSteps.push("Run `node scripts/install-hooks.mjs` to install Codex hooks and the global `cc-rescue` agent.");
+  if (!hooksStatus.installed) {
+    nextSteps.push("Run `node scripts/install-hooks.mjs` to install Codex hooks.");
   }
   if (!config.stopReviewGate) {
     nextSteps.push(
@@ -327,13 +289,11 @@ function buildSetupReport(cwd, actionsTaken = []) {
       nodeStatus.available &&
       claudeStatus.available &&
       authStatus.loggedIn &&
-      hooksStatus.installed &&
-      rescueAgentStatus.installed,
+      hooksStatus.installed,
     node: nodeStatus,
     claude: claudeStatus,
     auth: authStatus,
     hooks: hooksStatus,
-    rescueAgent: rescueAgentStatus,
     reviewGateEnabled: Boolean(config.stopReviewGate),
     actionsTaken,
     nextSteps

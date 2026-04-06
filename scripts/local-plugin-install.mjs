@@ -11,7 +11,12 @@ import path from "node:path";
 import process from "node:process";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { callCodexAppServer } from "./lib/codex-app-server.mjs";
 import { resolveCodexHome } from "./lib/codex-paths.mjs";
+import {
+  cleanupManagedGlobalIntegrations,
+  resolveManagedMarketplacePluginPath,
+} from "./lib/managed-global-integration.mjs";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_PLUGIN_ROOT = path.resolve(SCRIPT_DIR, "..");
@@ -22,15 +27,7 @@ const HOME_DIR = os.homedir();
 const CODEX_HOME = resolveCodexHome();
 const MARKETPLACE_FILE = path.join(HOME_DIR, ".agents", "plugins", "marketplace.json");
 const CODEX_CONFIG_FILE = path.join(CODEX_HOME, "config.toml");
-const CODEX_HOOKS_FILE = path.join(CODEX_HOME, "hooks.json");
-const CODEX_AGENT_FILE = path.join(CODEX_HOME, "agents", "cc-rescue.toml");
-const MANAGED_AGENT_MARKER = "# Managed by cc-plugin-codex.";
 const PLUGIN_CONFIG_HEADER = `[plugins."${PLUGIN_NAME}@${MARKETPLACE_NAME}"]`;
-const AGENT_CONFIG_HEADER = '[agents."cc-rescue"]';
-const MANAGED_AGENT_REGISTRATION_LINES = [
-  'description = "Forward substantial rescue tasks to Claude Code through the companion runtime."',
-  'config_file = "agents/cc-rescue.toml"',
-];
 
 function usage() {
   console.error(
@@ -38,10 +35,6 @@ function usage() {
       "[--plugin-root <path>] [--skip-hook-install]"
   );
   process.exit(1);
-}
-
-function normalizePathSlashes(value) {
-  return value.replace(/\\/g, "/");
 }
 
 function parseArgs(argv) {
@@ -92,21 +85,6 @@ function normalizeTrailingNewline(text) {
   return `${text.replace(/\s*$/, "")}\n`;
 }
 
-function resolveMarketplacePluginPath(pluginRoot) {
-  const relative = path.relative(HOME_DIR, pluginRoot);
-  if (!relative || relative === "") {
-    throw new Error(
-      `Plugin root must not be the marketplace root itself: ${pluginRoot}`
-    );
-  }
-  if (path.isAbsolute(relative)) {
-    throw new Error(
-      `Unable to express plugin root as a relative personal marketplace path: ${pluginRoot}`
-    );
-  }
-  return `./${normalizePathSlashes(relative)}`;
-}
-
 function loadMarketplaceFile() {
   const existing = readText(MARKETPLACE_FILE);
   if (!existing) {
@@ -150,7 +128,7 @@ function saveMarketplaceFile(data) {
 }
 
 function upsertMarketplaceEntry(pluginRoot) {
-  const pluginPath = resolveMarketplacePluginPath(pluginRoot);
+  const pluginPath = resolveManagedMarketplacePluginPath(pluginRoot);
   const marketplace = loadMarketplaceFile();
   const nextEntry = {
     name: PLUGIN_NAME,
@@ -183,7 +161,7 @@ function removeMarketplaceEntry(pluginRoot) {
     return;
   }
 
-  const pluginPath = resolveMarketplacePluginPath(pluginRoot);
+  const pluginPath = resolveManagedMarketplacePluginPath(pluginRoot);
   const marketplace = loadMarketplaceFile();
   marketplace.plugins = marketplace.plugins.filter((plugin) => {
     if (plugin?.name !== PLUGIN_NAME) {
@@ -223,44 +201,59 @@ function removeTomlSections(content, headers) {
   };
 }
 
-function getTomlSectionBodyLines(content, header) {
+function ensurePluginEnabled(content) {
   const lines = content.split("\n");
-  let inSection = false;
-  const body = [];
+  const next = [];
+  let inPluginSection = false;
+  let foundPluginSection = false;
+  let foundEnabled = false;
+  let changed = false;
 
   for (const line of lines) {
     const trimmed = line.trim();
-    if (!inSection) {
-      if (trimmed === header) {
-        inSection = true;
+    if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
+      if (inPluginSection && !foundEnabled) {
+        next.push("enabled = true");
+        foundEnabled = true;
+        changed = true;
+      }
+      inPluginSection = trimmed === PLUGIN_CONFIG_HEADER;
+      foundPluginSection ||= inPluginSection;
+      next.push(line);
+      continue;
+    }
+
+    if (inPluginSection && /^enabled\s*=/.test(trimmed)) {
+      foundEnabled = true;
+      if (trimmed !== "enabled = true") {
+        next.push("enabled = true");
+        changed = true;
+      } else {
+        next.push(line);
       }
       continue;
     }
 
-    if (trimmed.startsWith("[")) {
-      break;
-    }
-
-    if (trimmed !== "") {
-      body.push(trimmed);
-    }
+    next.push(line);
   }
 
-  return inSection ? body : null;
-}
-
-function appendTomlSection(content, header, bodyLines) {
-  const base = content.replace(/\s*$/, "");
-  const suffix = [header, ...bodyLines, ""].join("\n");
-  if (!base) {
-    return `${suffix}\n`;
+  if (inPluginSection && !foundEnabled) {
+    next.push("enabled = true");
+    changed = true;
   }
-  return `${base}\n\n${suffix}\n`;
-}
 
-function ensurePluginEnabled(content) {
-  const { content: withoutBlock } = removeTomlSections(content, new Set([PLUGIN_CONFIG_HEADER]));
-  return appendTomlSection(withoutBlock, PLUGIN_CONFIG_HEADER, ['enabled = true']);
+  if (!foundPluginSection) {
+    if (next.length > 0 && next[next.length - 1].trim() !== "") {
+      next.push("");
+    }
+    next.push(PLUGIN_CONFIG_HEADER, "enabled = true");
+    changed = true;
+  }
+
+  return {
+    changed,
+    content: normalizeTrailingNewline(next.join("\n").replace(/\n{3,}/g, "\n\n")),
+  };
 }
 
 function ensureCodexHooksEnabled(content) {
@@ -327,85 +320,24 @@ function writeConfigFile(content) {
   writeText(CODEX_CONFIG_FILE, normalizeTrailingNewline(content));
 }
 
-function removeLocalPluginConfig() {
+function removePluginConfigBlock() {
   const existing = readConfigFile();
-  let nextContent = existing;
-  let changed = false;
-
-  const pluginRemoval = removeTomlSections(nextContent, new Set([PLUGIN_CONFIG_HEADER]));
-  nextContent = pluginRemoval.content;
-  changed ||= pluginRemoval.changed;
-
-  const agentSection = getTomlSectionBodyLines(nextContent, AGENT_CONFIG_HEADER);
-  const hasManagedAgentRegistration =
-    Array.isArray(agentSection) &&
-    agentSection.length === MANAGED_AGENT_REGISTRATION_LINES.length &&
-    agentSection.every((line, index) => line === MANAGED_AGENT_REGISTRATION_LINES[index]);
-
-  if (hasManagedAgentRegistration) {
-    const agentRemoval = removeTomlSections(nextContent, new Set([AGENT_CONFIG_HEADER]));
-    nextContent = agentRemoval.content;
-    changed ||= agentRemoval.changed;
-  }
-
-  if (changed) {
-    writeConfigFile(nextContent);
+  const pluginRemoval = removeTomlSections(existing, new Set([PLUGIN_CONFIG_HEADER]));
+  if (pluginRemoval.changed) {
+    writeConfigFile(pluginRemoval.content);
   }
 }
 
-function configureLocalPlugin() {
+function configureCodexHooks() {
   const existing = readConfigFile();
-  const withPluginEnabled = ensurePluginEnabled(existing);
-  const { content } = ensureCodexHooksEnabled(withPluginEnabled);
+  const { content } = ensureCodexHooksEnabled(existing);
   writeConfigFile(content);
 }
 
-function removeManagedHooks(pluginRoot) {
-  const raw = readText(CODEX_HOOKS_FILE);
-  if (!raw) {
-    return;
-  }
-
-  const parsed = JSON.parse(raw);
-  const nextHooks = {};
-  let changed = false;
-  const hookPrefix = normalizePathSlashes(path.join(pluginRoot, "hooks")) + "/";
-
-  for (const [eventName, entries] of Object.entries(parsed.hooks ?? {})) {
-    const keptEntries = [];
-    for (const entry of entries ?? []) {
-      const keptNested = (entry.hooks ?? []).filter((hook) => {
-        const command = normalizePathSlashes(String(hook?.command ?? ""));
-        const shouldRemove = command.includes(hookPrefix);
-        changed ||= shouldRemove;
-        return !shouldRemove;
-      });
-      if (keptNested.length > 0) {
-        keptEntries.push({ ...entry, hooks: keptNested });
-      }
-    }
-    if (keptEntries.length > 0) {
-      nextHooks[eventName] = keptEntries;
-    }
-  }
-
-  if (!changed) {
-    return;
-  }
-
-  if (Object.keys(nextHooks).length === 0) {
-    fs.rmSync(CODEX_HOOKS_FILE, { force: true });
-    return;
-  }
-
-  writeText(CODEX_HOOKS_FILE, `${JSON.stringify({ hooks: nextHooks }, null, 2)}\n`);
-}
-
-function removeManagedAgentFile() {
-  const existing = readText(CODEX_AGENT_FILE);
-  if (existing?.includes(MANAGED_AGENT_MARKER)) {
-    fs.rmSync(CODEX_AGENT_FILE, { force: true });
-  }
+function enablePluginThroughConfigFallback() {
+  const existing = readConfigFile();
+  const { content } = ensurePluginEnabled(existing);
+  writeConfigFile(content);
 }
 
 function runInstallHooks(pluginRoot) {
@@ -420,27 +352,88 @@ function runInstallHooks(pluginRoot) {
   }
 }
 
-function install(pluginRoot, skipHookInstall) {
+async function installPluginThroughCodex() {
+  await callCodexAppServer({
+    cwd: path.dirname(MARKETPLACE_FILE),
+    method: "plugin/install",
+    params: {
+      marketplacePath: MARKETPLACE_FILE,
+      pluginName: PLUGIN_NAME,
+      forceRemoteSync: false,
+    },
+  });
+}
+
+function isCodexInstallFallbackEligible(error) {
+  const message = error instanceof Error ? error.message : String(error);
+  return (
+    /Method not found/i.test(message) ||
+    /Failed to start .*codex/i.test(message) ||
+    /app-server exited before responding to plugin\/install/i.test(message) ||
+    /app-server timed out waiting for plugin\/install/i.test(message)
+  );
+}
+
+async function uninstallPluginThroughCodex() {
+  await callCodexAppServer({
+    cwd: CODEX_HOME,
+    method: "plugin/uninstall",
+    params: {
+      pluginId: `${PLUGIN_NAME}@${MARKETPLACE_NAME}`,
+      forceRemoteSync: false,
+    },
+  });
+}
+
+export async function install(pluginRoot, skipHookInstall) {
   upsertMarketplaceEntry(pluginRoot);
-  configureLocalPlugin();
+  configureCodexHooks();
+  let usedFallback = false;
+  try {
+    await installPluginThroughCodex();
+  } catch (error) {
+    if (!isCodexInstallFallbackEligible(error)) {
+      throw error;
+    }
+    enablePluginThroughConfigFallback();
+    usedFallback = true;
+    const detail = error instanceof Error ? error.message : String(error);
+    console.warn(
+      `Warning: Codex plugin/install unavailable; enabled the plugin through config fallback. ${detail}`
+    );
+  }
   if (!skipHookInstall) {
     runInstallHooks(pluginRoot);
+  }
+  if (usedFallback) {
+    console.log("Installed using fallback local-plugin activation.");
   }
   console.log(`Installed ${PLUGIN_NAME} from ${pluginRoot}`);
 }
 
-function uninstall(pluginRoot) {
+export async function uninstall(pluginRoot) {
+  cleanupManagedGlobalIntegrations(pluginRoot);
   removeMarketplaceEntry(pluginRoot);
-  removeLocalPluginConfig();
-  removeManagedHooks(pluginRoot);
-  removeManagedAgentFile();
+  try {
+    await uninstallPluginThroughCodex();
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    console.warn(
+      `Warning: Codex plugin uninstall failed; continuing managed cleanup. ${detail}`
+    );
+  }
+  removePluginConfigBlock();
   console.log(`Uninstalled ${PLUGIN_NAME} from ${pluginRoot}`);
 }
 
-const { command, pluginRoot, skipHookInstall } = parseArgs(process.argv.slice(2));
+async function main() {
+  const { command, pluginRoot, skipHookInstall } = parseArgs(process.argv.slice(2));
 
-if (command === "install") {
-  install(pluginRoot, skipHookInstall);
-} else {
-  uninstall(pluginRoot);
+  if (command === "install") {
+    await install(pluginRoot, skipHookInstall);
+  } else {
+    await uninstall(pluginRoot);
+  }
 }
+
+await main();

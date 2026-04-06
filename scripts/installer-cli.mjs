@@ -17,6 +17,14 @@ const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const PACKAGE_ROOT = path.resolve(SCRIPT_DIR, "..");
 const CODEX_HOME = resolveCodexHome();
 const INSTALL_DIR = path.join(CODEX_HOME, "plugins", "cc");
+const CACHE_DIR = path.join(
+  CODEX_HOME,
+  "plugins",
+  "cache",
+  "local-plugins",
+  "cc",
+  "local"
+);
 const INCLUDED_PATHS = [
   ".codex-plugin",
   "CHANGELOG.md",
@@ -54,6 +62,15 @@ function samePath(a, b) {
 function ensureEmptyDir(dirPath) {
   fs.rmSync(dirPath, { recursive: true, force: true });
   fs.mkdirSync(dirPath, { recursive: true });
+}
+
+function removeIfEmpty(dirPath) {
+  if (!fs.existsSync(dirPath)) {
+    return;
+  }
+  if (fs.readdirSync(dirPath).length === 0) {
+    fs.rmdirSync(dirPath);
+  }
 }
 
 function copyDistribution(sourceRoot, destinationRoot) {
@@ -120,10 +137,17 @@ function uninstall() {
   }
 
   fs.rmSync(INSTALL_DIR, { recursive: true, force: true });
+  fs.rmSync(CACHE_DIR, { recursive: true, force: true });
   const pluginsDir = path.dirname(INSTALL_DIR);
+  const cachePluginDir = path.dirname(CACHE_DIR);
+  const cacheMarketplaceDir = path.dirname(cachePluginDir);
+  const cacheDir = path.dirname(cacheMarketplaceDir);
   if (fs.existsSync(pluginsDir) && fs.readdirSync(pluginsDir).length === 0) {
     fs.rmdirSync(pluginsDir);
   }
+  removeIfEmpty(cachePluginDir);
+  removeIfEmpty(cacheMarketplaceDir);
+  removeIfEmpty(cacheDir);
   console.log(`Plugin files removed from ${INSTALL_DIR}`);
 }
 

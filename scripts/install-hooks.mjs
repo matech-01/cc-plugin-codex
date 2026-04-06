@@ -6,7 +6,7 @@
  */
 
 /**
- * install-hooks.mjs — Installs plugin hooks plus the global cc-rescue agent.
+ * install-hooks.mjs — Installs plugin hooks.
  *
  * Steps:
  * 1. Read hooks/hooks.json from plugin dir (resolve relative to import.meta.url)
@@ -14,9 +14,7 @@
  * 3. Read existing ~/.codex/hooks.json (or empty {hooks:{}})
  * 4. For each event type, append new hooks (don't overwrite existing)
  * 5. Write merged result
- * 6. Copy the managed cc-rescue agent file into ~/.codex/agents/cc-rescue.toml
- * 7. Ensure ~/.codex/config.toml registers [agents."cc-rescue"]
- * 8. Check if ~/.codex/config.toml has codex_hooks = true, print guidance if not
+ * 6. Check if ~/.codex/config.toml has codex_hooks = true, print guidance if not
  */
 
 import fs from "node:fs";
@@ -27,13 +25,9 @@ import { resolveCodexHome } from "./lib/codex-paths.mjs";
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const PLUGIN_ROOT = path.resolve(SCRIPT_DIR, "..");
 const PLUGIN_HOOKS_FILE = path.join(PLUGIN_ROOT, "hooks", "hooks.json");
-const PLUGIN_AGENT_TEMPLATE_FILE = path.join(PLUGIN_ROOT, "agents", "cc-rescue.toml");
 const CODEX_DIR = resolveCodexHome();
 const CODEX_HOOKS_FILE = path.join(CODEX_DIR, "hooks.json");
 const CODEX_CONFIG_TOML = path.join(CODEX_DIR, "config.toml");
-const CODEX_AGENTS_DIR = path.join(CODEX_DIR, "agents");
-const CODEX_RESCUE_AGENT_FILE = path.join(CODEX_AGENTS_DIR, "cc-rescue.toml");
-const MANAGED_AGENT_MARKER = "# Managed by cc-plugin-codex.";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -69,10 +63,6 @@ function escapeShellArgument(value) {
     return `"${text.replace(/"/g, '""')}"`;
   }
   return `'${text.replace(/'/g, `'\\''`)}'`;
-}
-
-function escapeTomlString(value) {
-  return String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 }
 
 function resolvePluginSubpath(relativePath) {
@@ -125,67 +115,6 @@ function deepReplacePlaceholders(obj) {
     return result;
   }
   return obj;
-}
-
-function timestampSuffix() {
-  return new Date().toISOString().replace(/[:.]/g, "-");
-}
-
-function installRescueAgentFile() {
-  const template = readTextFile(PLUGIN_AGENT_TEMPLATE_FILE);
-  if (!template) {
-    console.error("Error: Could not read rescue agent template at", PLUGIN_AGENT_TEMPLATE_FILE);
-    process.exit(1);
-  }
-
-  const resolved = template
-    .replace(/^(\s*path\s*=\s*)"\$PLUGIN_ROOT\/([^"]+)"$/gm, (_, prefix, relativePath) =>
-      `${prefix}"${escapeTomlString(resolvePluginSubpath(relativePath))}"`
-    )
-    .replace(/"\$PLUGIN_ROOT\/([^"]+)"/g, (_, relativePath) =>
-      escapeShellArgument(resolvePluginSubpath(relativePath))
-    );
-  const existing = readTextFile(CODEX_RESCUE_AGENT_FILE);
-
-  if (existing === resolved) {
-    console.log(`Rescue agent already up to date at ${CODEX_RESCUE_AGENT_FILE}`);
-    return { changed: false, backedUp: null };
-  }
-
-  let backupPath = null;
-  if (existing && !existing.includes(MANAGED_AGENT_MARKER)) {
-    backupPath = `${CODEX_RESCUE_AGENT_FILE}.bak-${timestampSuffix()}`;
-    writeTextFile(backupPath, existing);
-    console.log(`Backed up existing custom rescue agent to ${backupPath}`);
-  }
-
-  writeTextFile(CODEX_RESCUE_AGENT_FILE, resolved);
-  console.log(`Installed rescue agent at ${CODEX_RESCUE_AGENT_FILE}`);
-  return { changed: true, backedUp: backupPath };
-}
-
-function hasRescueAgentRegistration(configContent) {
-  return /^\s*\[agents\.(?:"cc-rescue"|cc-rescue)\]\s*$/m.test(configContent);
-}
-
-function ensureRescueAgentRegistration() {
-  const existing = readTextFile(CODEX_CONFIG_TOML) ?? "";
-  if (hasRescueAgentRegistration(existing)) {
-    console.log('Found existing [agents."cc-rescue"] registration in config.toml');
-    return { changed: false };
-  }
-
-  const block = [
-    "",
-    '[agents."cc-rescue"]',
-    'description = "Forward substantial rescue tasks to Claude Code through the companion runtime."',
-    'config_file = "agents/cc-rescue.toml"',
-    "",
-  ].join("\n");
-
-  writeTextFile(CODEX_CONFIG_TOML, `${existing.replace(/\s*$/, "")}${block}`);
-  console.log('Added [agents."cc-rescue"] to ~/.codex/config.toml');
-  return { changed: true };
 }
 
 /**
@@ -312,13 +241,7 @@ function main() {
   console.log(`  Added: ${addedCount} hook entries`);
   console.log(`  Skipped: ${skippedCount} duplicate entries`);
 
-  // Step 6: Install managed rescue agent file
-  const agentInstall = installRescueAgentFile();
-
-  // Step 7: Ensure config.toml registers the rescue agent
-  const agentRegistration = ensureRescueAgentRegistration();
-
-  // Step 8: Check config.toml for codex_hooks setting
+  // Step 6: Check config.toml for codex_hooks setting
   let hasCodexHooks = false;
   if (fs.existsSync(CODEX_CONFIG_TOML)) {
     const configContent = fs.readFileSync(CODEX_CONFIG_TOML, "utf8");
@@ -340,11 +263,7 @@ function main() {
   }
 
   console.log("");
-  if (agentInstall.changed || agentRegistration.changed) {
-    console.log('Global "cc-rescue" agent is installed and registered.');
-  } else {
-    console.log('Global "cc-rescue" agent was already installed.');
-  }
+  console.log("Codex hooks installation complete.");
 }
 
 main();
