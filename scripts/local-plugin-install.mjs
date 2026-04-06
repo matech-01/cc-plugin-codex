@@ -16,6 +16,7 @@ import { resolveCodexHome } from "./lib/codex-paths.mjs";
 import {
   cleanupManagedGlobalIntegrations,
   resolveManagedMarketplacePluginPath,
+  removeManagedSkillWrappers,
 } from "./lib/managed-global-integration.mjs";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -27,7 +28,18 @@ const HOME_DIR = os.homedir();
 const CODEX_HOME = resolveCodexHome();
 const MARKETPLACE_FILE = path.join(HOME_DIR, ".agents", "plugins", "marketplace.json");
 const CODEX_CONFIG_FILE = path.join(CODEX_HOME, "config.toml");
+const CODEX_SKILLS_DIR = path.join(CODEX_HOME, "skills");
+const CODEX_PROMPTS_DIR = path.join(CODEX_HOME, "prompts");
 const PLUGIN_CONFIG_HEADER = `[plugins."${PLUGIN_NAME}@${MARKETPLACE_NAME}"]`;
+const EXPORTED_SKILLS = [
+  "review",
+  "adversarial-review",
+  "rescue",
+  "status",
+  "result",
+  "cancel",
+  "setup",
+];
 
 function usage() {
   console.error(
@@ -83,6 +95,105 @@ function writeText(filePath, content) {
 
 function normalizeTrailingNewline(text) {
   return `${text.replace(/\s*$/, "")}\n`;
+}
+
+function normalizePathSlashes(value) {
+  return value.replace(/\\/g, "/");
+}
+
+function formatWrapperName(skillName) {
+  return `${PLUGIN_NAME}-${skillName}`;
+}
+
+function formatSkillInvocationName(skillName) {
+  return `${PLUGIN_NAME}:${skillName}`;
+}
+
+function extractFrontmatterField(markdown, fieldName) {
+  const match = markdown.match(/^---\n([\s\S]*?)\n---\n?/);
+  if (!match) {
+    return null;
+  }
+
+  for (const line of match[1].split("\n")) {
+    const fieldMatch = line.match(/^([A-Za-z0-9_-]+):\s*(.*)$/);
+    if (!fieldMatch) {
+      continue;
+    }
+    if (fieldMatch[1] === fieldName) {
+      return fieldMatch[2];
+    }
+  }
+  return null;
+}
+
+function rewriteSkillFrontmatter(markdown, skillName) {
+  return markdown.replace(/^---\n([\s\S]*?)\n---/, (_whole, body) => {
+    const nextLines = body.split("\n").map((line) => {
+      if (line.startsWith("name:")) {
+        return `name: ${formatSkillInvocationName(skillName)}`;
+      }
+      return line;
+    });
+    return `---\n${nextLines.join("\n")}\n---`;
+  });
+}
+
+function rewriteSkillBody(markdown, pluginRoot) {
+  const normalizedPluginRoot = normalizePathSlashes(pluginRoot);
+  return markdown
+    .replace(
+      "Resolve `<plugin-root>` as two directories above this skill file. The companion entrypoint is:",
+      "Use the companion entrypoint at:"
+    )
+    .replace(
+      "Resolve `<plugin-root>` as two directories above this skill file, then run:",
+      "Use the companion entrypoint:"
+    )
+    .replace(
+      "Resolve `<plugin-root>` as two directories above this skill file.",
+      `Use the installed plugin root at \`${normalizedPluginRoot}\`.`
+    )
+    .replaceAll("<plugin-root>", normalizedPluginRoot);
+}
+
+function installCodexSkillWrappers(pluginRoot) {
+  for (const skillName of EXPORTED_SKILLS) {
+    const sourceSkillPath = path.join(pluginRoot, "skills", skillName, "SKILL.md");
+    const sourceSkill = readText(sourceSkillPath);
+    if (!sourceSkill) {
+      throw new Error(`Missing skill source: ${sourceSkillPath}`);
+    }
+
+    const wrappedSkill = rewriteSkillBody(
+      rewriteSkillFrontmatter(sourceSkill, skillName),
+      pluginRoot
+    );
+    const targetSkillPath = path.join(
+      CODEX_SKILLS_DIR,
+      formatWrapperName(skillName),
+      "SKILL.md"
+    );
+    writeText(targetSkillPath, normalizeTrailingNewline(wrappedSkill));
+
+    const description = extractFrontmatterField(sourceSkill, "description");
+    const promptBody = [
+      "---",
+      ...(description ? [`description: ${description}`] : []),
+      "---",
+      "",
+      `Use the $${formatSkillInvocationName(skillName)} skill for this command and follow its instructions exactly.`,
+      "",
+      "Treat any text after the prompt name as the raw arguments to pass through.",
+      "",
+      "Do not restate the command. Just route to the skill.",
+    ].join("\n");
+
+    writeText(
+      path.join(CODEX_PROMPTS_DIR, `${formatWrapperName(skillName)}.md`),
+      normalizeTrailingNewline(promptBody)
+    );
+  }
 }
 
 function loadMarketplaceFile() {
@@ -391,15 +502,17 @@ export async function install(pluginRoot, skipHookInstall) {
   let usedFallback = false;
   try {
     await installPluginThroughCodex();
+    removeManagedSkillWrappers();
   } catch (error) {
     if (!isCodexInstallFallbackEligible(error)) {
       throw error;
     }
     enablePluginThroughConfigFallback();
+    installCodexSkillWrappers(pluginRoot);
     usedFallback = true;
     const detail = error instanceof Error ? error.message : String(error);
     console.warn(
-      `Warning: Codex plugin/install unavailable; enabled the plugin through config fallback. ${detail}`
+      `Warning: Codex plugin/install unavailable; enabled the plugin through config fallback and installed Codex-native cc-* wrappers. ${detail}`
     );
   }
   if (!skipHookInstall) {
