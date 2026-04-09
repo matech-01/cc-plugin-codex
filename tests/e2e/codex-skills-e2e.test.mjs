@@ -698,9 +698,11 @@ function startMockProvider({
   taskCommand: taskCommandOverride = null,
   expectedChildNeedles = [],
   expectedFinalOutput = null,
+  notificationMessage = null,
 }) {
   const requests = [];
   const errors = [];
+  const phases = [];
   const spawnCallId = "spawn-1";
   const shellCallId = "shell-1";
   const waitCallId = "wait-1";
@@ -725,6 +727,7 @@ function startMockProvider({
             data: [
               { id: "mock-model", object: "model" },
               { id: "gpt-5.4", object: "model" },
+              { id: "gpt-5.4-mini", object: "model" },
             ],
           })
         );
@@ -745,6 +748,7 @@ function startMockProvider({
         let events;
 
         if (responseIndex === 1) {
+          phases.push("parent-init");
           const serializedUserRequest = JSON.stringify(userRequest).slice(1, -1);
           assert.ok(
             bodyText.includes("Claude Code Rescue"),
@@ -770,15 +774,25 @@ function startMockProvider({
             typeof defaultRoleBlock === "string" && defaultRoleBlock.includes("Default agent."),
             `parent turn should advertise the built-in default role in the spawn_agent schema, saw: ${defaultRoleBlock}`
           );
+          assert.ok(
+            bodyText.includes("retry once with") && bodyText.includes("gpt-5.4"),
+            "parent turn should include the narrow gpt-5.4 fallback guidance for mini-unavailable errors"
+          );
+          assert.ok(
+            bodyText.includes("Do not use that fallback for arbitrary failures"),
+            "parent turn should forbid broad fallback on generic spawn failures"
+          );
 
           const spawnArgs = {
             agent_type: "default",
-            model: "gpt-5.4",
+            model: "gpt-5.4-mini",
             reasoning_effort: "medium",
             message:
               "You are a transient forwarding worker for Claude Code rescue.\n" +
               "Run exactly one shell command.\n" +
               "Return only that command's stdout text exactly.\n" +
+              "Ignore stderr progress chatter such as [cc] lines.\n" +
+              "If the tool output includes both stderr progress and a final stdout-style result, preserve only the final stdout-equivalent result text.\n" +
               "Do not trim, normalize, add punctuation, or add commentary.\n" +
               "Do not drop prefixes like completed: or strip a leading slash command.\n" +
               "Do not inspect the repository, read files, grep, or do the task directly.\n" +
@@ -794,6 +808,7 @@ function startMockProvider({
             eventCompleted("resp-parent-1"),
           ];
         } else if (responseIndex === 2) {
+          phases.push("child-shell");
           assert.ok(
             bodyText.includes("Run exactly one shell command") ||
               bodyText.includes("Run exactly this command and return stdout unchanged"),
@@ -810,6 +825,14 @@ function startMockProvider({
           assert.ok(
             bodyText.includes("Return only that command's stdout text exactly"),
             "built-in child should be told to preserve stdout exactly"
+          );
+          assert.ok(
+            bodyText.includes("Ignore stderr progress chatter such as [cc] lines."),
+            "built-in child should be told to ignore stderr progress chatter"
+          );
+          assert.ok(
+            bodyText.includes("preserve only the final stdout-equivalent result text"),
+            "built-in child should be told to prefer the final stdout-equivalent result over stderr chatter"
           );
           assert.ok(
             bodyText.includes("Do not drop prefixes like completed:"),
@@ -845,8 +868,11 @@ function startMockProvider({
             eventCompleted("resp-child-1"),
           ];
         } else if (responseIndex === 3) {
+          phases.push("child-final");
           childRenderedOutput =
-            expectedFinalOutput ?? computeExpectedChildOutput(taskPrompt);
+            notificationMessage ??
+            expectedFinalOutput ??
+            computeExpectedChildOutput(taskPrompt);
           events = [
             eventCreated("resp-child-2"),
             eventAssistantMessage("msg-child-2", childRenderedOutput.trimEnd()),
@@ -856,6 +882,7 @@ function startMockProvider({
           const toolNames = getToolNames(body);
           const hasNotification = bodyText.includes("<subagent_notification>");
           if (toolNames.includes("wait_agent") || toolNames.includes("wait")) {
+            phases.push("parent-wait");
             const agentId = extractAgentIdFromSpawnOutput(body, spawnCallId);
             assert.ok(
               agentId,
@@ -873,15 +900,26 @@ function startMockProvider({
               eventCompleted("resp-parent-2"),
             ];
           } else if (hasNotification) {
+            phases.push("parent-notification");
+            if (notificationMessage) {
+              assert.ok(
+                bodyText.includes(notificationMessage),
+                "parent notification follow-up should carry the steering message, not the raw child result"
+              );
+            }
             events = [
               eventCreated("resp-parent-2"),
-              eventAssistantMessage("msg-parent-2", childRenderedOutput.trimEnd()),
+              eventAssistantMessage(
+                "msg-parent-2",
+                (notificationMessage ?? childRenderedOutput).trimEnd()
+              ),
               eventCompleted("resp-parent-2"),
             ];
           } else {
             throw new Error("parent follow-up should either expose a wait tool or include a subagent notification");
           }
         } else if (responseIndex === 5) {
+          phases.push("parent-final");
           assert.ok(
             typeof childRenderedOutput === "string" && childRenderedOutput.trim(),
             "provider should have captured the child rendered output before the parent wait completes"
@@ -891,14 +929,20 @@ function startMockProvider({
             "parent post-wait turn should include the subagent completion notification"
           );
           const completedMessage = extractCompletedMessageFromWaitOutput(body, waitCallId);
+          const expectedCompletedMessage = (
+            notificationMessage ?? childRenderedOutput
+          ).trim();
           assert.ok(
             typeof completedMessage === "string" &&
-              completedMessage.trim() === childRenderedOutput.trim(),
-            "wait_agent output should expose the child final message"
+              completedMessage.trim() === expectedCompletedMessage,
+            "wait_agent output should expose the expected completion message"
           );
           events = [
             eventCreated("resp-parent-3"),
-            eventAssistantMessage("msg-parent-3", childRenderedOutput.trimEnd()),
+            eventAssistantMessage(
+              "msg-parent-3",
+              (notificationMessage ?? childRenderedOutput).trimEnd()
+            ),
             eventCompleted("resp-parent-3"),
           ];
         } else {
@@ -922,6 +966,7 @@ function startMockProvider({
 
   return {
     errors,
+    phases,
     requests,
     listen() {
       return new Promise((resolve) => {
@@ -1074,12 +1119,15 @@ describe("Codex rescue-skill E2E", () => {
         `expected fake Claude invocation for prompt ${taskPrompt}`
       );
 
-      const responsePosts = provider.requests.filter(
-        (entry) => entry.method === "POST"
-      );
+      const acceptedPhaseSequences = [
+        ["parent-init", "child-shell", "child-final"],
+        ["parent-init", "child-shell", "child-final", "parent-wait", "parent-final"],
+      ];
       assert.ok(
-        responsePosts.length === 4 || responsePosts.length === 5,
-        `expected 4 or 5 response posts, saw ${responsePosts.length}`
+        acceptedPhaseSequences.some(
+          (sequence) => JSON.stringify(sequence) === JSON.stringify(provider.phases)
+        ),
+        `expected the built-in rescue wait flow to use either the direct child-completion path or the explicit wait-follow-up path, saw ${JSON.stringify(provider.phases)}`
       );
     } finally {
       await provider.close();
@@ -1139,6 +1187,54 @@ describe("Codex rescue-skill E2E", () => {
         claudeInvocations.some((entry) => entry.prompt === taskPrompt),
         `expected fake Claude invocation for prompt ${taskPrompt}`
       );
+    } finally {
+      await provider.close();
+      cleanupEnvironment(testEnv);
+    }
+  });
+
+  it("keeps background rescue completion as a steering message instead of inlining the raw result", async (t) => {
+    if (!codexAvailable()) {
+      t.skip("codex CLI is not available in this environment");
+      return;
+    }
+
+    const testEnv = createEnvironment();
+    const reservedJobId = "task-background-steer-123";
+    const taskPrompt = "codex-rescue-e2e background-notify delay=10";
+    const userRequest = "$cc:rescue --background say hello from codex e2e in background";
+    const notificationMessage = `Background Claude Code rescue finished. Open it with $cc:result ${reservedJobId}.`;
+    const provider = startMockProvider({
+      taskPrompt,
+      userRequest,
+      mode: "builtin-default",
+      taskCommand:
+        `node ${JSON.stringify(COMPANION_SCRIPT)} task --fresh --job-id ${JSON.stringify(reservedJobId)} --view-state defer ${JSON.stringify(taskPrompt)}`,
+      expectedChildNeedles: ["--view-state defer", "--job-id", reservedJobId],
+      notificationMessage,
+    });
+    testEnv.providerPort = await provider.listen();
+    installHooks(testEnv);
+    writeConfigToml(testEnv, testEnv.providerPort);
+
+    try {
+      const execResult = await runCodexExec(testEnv, buildRescuePrompt(userRequest));
+
+      assert.equal(
+        execResult.status,
+        0,
+        [
+          "background rescue codex exec failed",
+          `stdout:\n${execResult.stdout}`,
+          `stderr:\n${execResult.stderr}`,
+          `provider requests: ${provider.requests.length}`,
+          `provider errors: ${JSON.stringify(provider.errors, null, 2)}`,
+        ].join("\n\n")
+      );
+
+      const finalMessage = fs.readFileSync(testEnv.outputFile, "utf8").trim();
+      assert.equal(finalMessage, notificationMessage);
+      assert.notEqual(finalMessage, `completed:${taskPrompt}`);
     } finally {
       await provider.close();
       cleanupEnvironment(testEnv);

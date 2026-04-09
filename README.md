@@ -1,274 +1,324 @@
-# cc-plugin-codex
+<p align="center">
+  <img src="assets/cc-plugin-codex-logo.svg" height="128" alt="cc-plugin-codex" />
+</p>
 
-Use Claude Code from inside Codex.
+<h3 align="center">Claude Code Plugin for Codex</h3>
 
-`cc-plugin-codex` is an open-source Codex plugin for Claude-powered review, rescue, and tracked background workflows.
+<p align="center">
+  Run Claude Code reviews, rescue tasks, and tracked background work from inside Codex.
+</p>
 
-This repository is maintained by Sendbird and follows the overall shape of [openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc), but in the opposite direction: Codex hosts the plugin and delegates work to Claude Code.
+<p align="center">
+  <a href="#quick-start"><strong>Quick Start</strong></a> ·
+  <a href="#commands"><strong>Commands</strong></a> ·
+  <a href="#background-jobs"><strong>Background Jobs</strong></a> ·
+  <a href="#review-gate"><strong>Review Gate</strong></a> ·
+  <a href="#how-this-differs-from-upstream"><strong>vs Upstream</strong></a> ·
+  <a href="https://github.com/sendbird/cc-plugin-codex/issues"><strong>Issues</strong></a>
+</p>
 
-## What You Get
+---
 
-- `$cc:review` for a normal read-only Claude Code review
-- `$cc:adversarial-review` for a steerable challenge review
-- `$cc:rescue`, `$cc:status`, `$cc:result`, and `$cc:cancel` to delegate work and manage tracked jobs
-- `$cc:setup` to verify Claude Code readiness, hook installation, rescue-agent wiring, and review-gate state
+## What Is This?
 
-## How This Differs From Upstream
+`cc-plugin-codex` turns Codex into a host for Claude Code work.
+**Codex stays in charge of the thread. Claude Code does the review and rescue work.**
 
-The goal is to stay close to the upstream OpenAI plugin's UX, but Claude Code and Codex expose different runtime surfaces.
+You get seven commands (`$cc:review`, `$cc:adversarial-review`, `$cc:rescue`, `$cc:status`, `$cc:result`, `$cc:cancel`, `$cc:setup`) that launch tracked Claude Code work, manage lifecycle and ownership, and surface results back into Codex.
 
-| Topic | `openai/codex-plugin-cc` | This repository |
-| --- | --- | --- |
-| Host app | Claude Code hosts the plugin | Codex hosts the plugin |
-| User command surface | Claude slash commands such as `/codex:review` | Codex skills such as `$cc:review` |
-| Delegated runtime | Codex app-server + broker | Fresh `claude -p` subprocess per invocation |
-| Review gate subject | Reviews the previous Claude response before Claude stops | Reviews the previous Codex response before Codex stops |
-| Rescue agent | Plugin-local Codex rescue agent inside Claude | Global `cc-rescue` agent in `~/.codex/agents` |
-| Model / effort flags | Codex model names and Codex effort controls | Claude model names and Claude effort values: `low`, `medium`, `high`, `max` |
+That includes:
+- Built-in Codex subagent orchestration for rescue and background review flows
+- Session-scoped tracked jobs with status, result, and cancel commands
+- Background completion nudges that steer you to the right `$cc:result <job-id>`
+- An optional stop-time review gate
 
-## Where This Goes Further
+It follows the shape of [openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc) but runs in the opposite direction.
 
-In addition to mirroring the upstream command surface, this repository adds a few implementation-focused optimizations:
+## Quick Start
 
-- The stop-time review gate computes a turn baseline and skips Claude review entirely when the most recent Codex turn made no net edits, which helps avoid unnecessary token spend.
-- Nested helper sessions suppress stop-time review and unread-result prompts, so the review gate stays attached to the user-facing Codex thread instead of recursive child runs.
-- Background Claude jobs track unread/viewed state and session ownership, which makes `$cc:status`, `$cc:result`, and follow-up rescue flows safer for concurrent work.
-- The installer is idempotent and manages the personal marketplace entry, hooks, and global `cc-rescue` registration together, so install and reinstall are a single step.
-
-## Requirements
-
-- Codex with hook support
-- Node.js 18 or later
-- Claude Code CLI installed and authenticated
-  - `claude auth login`, or
-  - `ANTHROPIC_API_KEY` set in the environment
-
-## Install
-
-Choose either install path below. Both install the plugin into `~/.codex/plugins/cc`, create or update `~/.agents/plugins/marketplace.json`, enable `cc@local-plugins` in `~/.codex/config.toml`, enable `codex_hooks = true`, and install Codex hooks plus the global `cc-rescue` agent.
-
-### npx
+### 1. Install
 
 ```bash
 npx cc-plugin-codex install
 ```
 
-### Shell Script
+That's the entire install. It:
+- Copies the plugin to `~/.codex/plugins/cc`
+- Activates the plugin through Codex app-server when available
+- Falls back to config-based activation on older Codex builds
+- Enables `codex_hooks = true`
+- Installs lifecycle, review-gate, and unread-result hooks
+
+> **Prerequisites:** Node.js 18+, Codex with hook support, and `claude` CLI installed and authenticated.
+> If you don't have the Claude CLI yet:
+> ```bash
+> npm install -g @anthropic-ai/claude-code && claude auth login
+> ```
+
+### 2. Verify
+
+Open Codex and run:
+
+```text
+$cc:setup
+```
+
+All checks should pass. If any fail, `$cc:setup` tells you what to fix.
+
+### 3. Try It
+
+```text
+$cc:review --background
+```
+
+That launches a Claude Code review from a Codex-managed background flow. You can check on it immediately:
+
+```text
+$cc:status
+$cc:result
+```
+
+When it finishes, Codex should nudge you toward the right result. If not, `$cc:status` and `$cc:result` are always the fallback.
+
+## Commands
+
+| Command | What It Does |
+| --- | --- |
+| `$cc:review` | Read-only Claude Code review of your changes |
+| `$cc:adversarial-review` | Design-challenging review — questions approach, tradeoffs, hidden assumptions |
+| `$cc:rescue` | Hand a task to Claude Code — bugs, fixes, investigations, follow-ups |
+| `$cc:status` | List running and recent Claude Code jobs, or inspect one job |
+| `$cc:result` | Open the output of a finished job |
+| `$cc:cancel` | Cancel an active background job |
+| `$cc:setup` | Verify installation, auth, hooks, and review gate |
+
+### `$cc:review`
+
+Standard read-only review of your current work.
+
+```text
+$cc:review                          # review uncommitted changes
+$cc:review --base main              # review branch vs main
+$cc:review --scope branch           # explicitly compare branch tip to base
+$cc:review --background             # run in background, check with $cc:status later
+$cc:review --model sonnet           # use a specific Claude model
+```
+
+**Flags:** `--base <ref>`, `--scope <auto|working-tree|branch>`, `--wait`, `--background`, `--model <model>`
+
+Scope `auto` (the default) inspects `git status` and chooses between working-tree and branch automatically.
+
+In foreground, review returns the result directly. In background, the plugin uses a Codex built-in subagent, tracks the review as a job, and nudges you to open the result when it completes.
+
+### `$cc:adversarial-review`
+
+Same as `$cc:review`, but steers Claude to challenge the implementation — tradeoffs, alternative approaches, hidden assumptions.
+
+```text
+$cc:adversarial-review
+$cc:adversarial-review --background question the retry and rollback strategy
+$cc:adversarial-review --base main challenge the caching design
+```
+
+Accepts the same flags as `$cc:review`, plus free-text focus after flags to steer the review.
+
+Background adversarial review uses the same tracked built-in subagent pattern as `$cc:review`.
+
+### `$cc:rescue`
+
+Hand a task to Claude Code. This is the main way to delegate real work — bug fixes, investigations, refactors.
+
+```text
+$cc:rescue investigate why the tests started failing
+$cc:rescue fix the failing test with the smallest safe patch
+$cc:rescue --resume apply the top fix from the last run
+$cc:rescue --background investigate the regression
+$cc:rescue --model sonnet --effort medium investigate the flaky test
+```
+
+**Flags:**
+
+| Flag | Description |
+| --- | --- |
+| `--background` | Run in background; check later with `$cc:status` |
+| `--wait` | Run in foreground |
+| `--resume` | Continue the most recent Claude Code task |
+| `--resume-last` | Alias for `--resume` |
+| `--fresh` | Force a new task (don't resume) |
+| `--write` | Allow file edits (default) |
+| `--model <model>` | Claude model (`sonnet`, `haiku`, or full ID) |
+| `--effort <level>` | Reasoning effort: `low`, `medium`, `high`, `max` |
+| `--prompt-file <path>` | Read task description from a file |
+
+**Resume behavior:** If you don't pass `--resume` or `--fresh`, rescue checks for a resumable Claude session and asks once whether to continue or start fresh. Your phrasing guides the recommendation — "continue the last run" → resume, "start over" → fresh.
+
+Background rescue runs through a built-in Codex subagent. When the child finishes, the plugin tries to nudge the parent thread with the exact `$cc:result <job-id>` to open.
+
+### `$cc:status`
+
+```text
+$cc:status                          # list active and recent jobs
+$cc:status task-abc123              # detailed status for one job
+$cc:status --all                    # include older jobs
+$cc:status --wait task-abc123       # block until job completes
+```
+
+### `$cc:result`
+
+```text
+$cc:result                          # open the latest finished job for this session/repo
+$cc:result task-abc123              # show finished job output
+```
+
+The output includes the Claude session ID. To reopen that session directly:
+
+```bash
+claude --resume <session-id>
+```
+
+### `$cc:cancel`
+
+```text
+$cc:cancel task-abc123              # cancel a running job
+```
+
+### `$cc:setup`
+
+```text
+$cc:setup                           # verify everything
+$cc:setup --enable-review-gate      # turn on stop-time review gate
+$cc:setup --disable-review-gate     # turn it off
+```
+
+Setup checks Claude Code availability, hook installation, and review-gate state. If hooks are missing, it reinstalls them. If Claude Code isn't installed, it offers to install it.
+
+## Background Jobs
+
+All review and rescue commands support `--background`. Background jobs are tracked per-session with full lifecycle management:
+
+1. **Queued → Running → Completed** — jobs progress through states automatically.
+2. **Built-in subagent background flows** — background rescue, review, and adversarial review use Codex-managed subagent turns rather than stuffing `--background` into the companion command itself.
+3. **Completion nudges** — when a background built-in flow finishes, the plugin tries to nudge the parent thread with the right `$cc:result <job-id>`. If that nudge cannot surface cleanly, unread-result hooks are the backstop.
+   The nudge is intentionally just a pointer. The actual stored result still opens through `$cc:result`.
+4. **Unread-result fallback** — when you submit your next prompt after a finished unread job, Codex can remind you that a result is waiting and point you to `$cc:status` / `$cc:result`.
+5. **Session ownership** — jobs are scoped to the Codex session that created them. Nested sessions do not steal ownership of parent jobs.
+6. **Cleanup on exit** — when your Codex session ends, any still-running detached jobs are terminated via PID identity validation, and stale reserved job markers are cleaned up over time.
+
+**Typical background flow:**
+
+```text
+$cc:rescue --background investigate the performance regression
+# ... keep working ...
+# Codex nudges with the exact result command when possible
+$cc:result task-abc123
+```
+
+### What “background” means here
+
+- The parent Codex thread does not wait.
+- The Claude companion command still runs in the foreground inside its own worker/subagent thread.
+- For rescue and background review flows, the plugin prefers Codex built-in subagents and only uses job polling/status commands as the durable backstop.
+
+## Review Gate
+
+The review gate is an **optional** stop-time hook. When enabled, pressing Ctrl+C in Codex triggers a Claude Code review of the last Codex response before the stop is accepted.
+
+- Claude returns `ALLOW:` → stop proceeds normally.
+- Claude returns `BLOCK:` → stop is rejected; Codex continues.
+
+**Caveats:**
+
+- **Disabled by default.** Enable with `$cc:setup --enable-review-gate`.
+- **Token cost.** Every Ctrl+C triggers a Claude invocation. This can drain usage limits quickly if you stop often.
+- **15-minute timeout.** The gate has a hard timeout. If Claude doesn't respond, the stop is allowed.
+- **Skip-on-no-edits.** The gate computes a working-tree fingerprint baseline and skips review when the last Codex turn made no net edits.
+- **Not in nested sessions.** Child sessions (e.g., rescue subagents) suppress the gate to avoid feedback loops.
+
+**Only enable when you're actively monitoring the session.**
+
+## How This Differs From Upstream
+
+| | [openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc) | This repository |
+| --- | --- | --- |
+| **Host** | Claude Code hosts the plugin | Codex hosts the plugin |
+| **Commands** | `/codex:review`, `/codex:rescue`, … | `$cc:review`, `$cc:rescue`, … |
+| **Runtime** | Codex app-server + broker | Fresh `claude -p` subprocess per invocation |
+| **Review gate** | Reviews previous Claude response | Reviews previous Codex response |
+| **Model flags** | Codex model names and effort controls | Claude model names and effort values (`low` / `medium` / `high` / `max`) |
+
+### Where This Goes Further
+
+- **Smart review gate** — fingerprints the working tree and skips review when the last Codex turn made no net edits, avoiding unnecessary token spend.
+- **Nested-session awareness** — suppresses stop-time review and unread-result prompts in child runs, keeping interactive hooks attached to the user-facing thread only.
+- **Tracked job ownership** — background jobs track unread/viewed state and session ownership, with safe PID-validated cleanup on session exit.
+- **Built-in background notify** — rescue and review flows can now wake the parent thread and point directly to `$cc:result <job-id>` instead of relying only on later polling.
+- **Unread-result nudges** — completed background jobs are still surfaced in your next prompt as a reliable fallback.
+- **Idempotent installer** — manages plugin files, hooks, and config in a single atomic step. Safe to re-run for updates. Falls back gracefully on older Codex builds.
+
+## Install Variants
+
+### npx (recommended)
+
+```bash
+npx cc-plugin-codex install
+```
+
+### Shell script
 
 ```bash
 curl -fsSL "https://raw.githubusercontent.com/sendbird/cc-plugin-codex/main/scripts/install.sh" | bash
 ```
 
+### Local checkout
+
+```bash
+git clone https://github.com/sendbird/cc-plugin-codex.git ~/.codex/plugins/cc
+cd ~/.codex/plugins/cc
+node scripts/local-plugin-install.mjs install --plugin-root ~/.codex/plugins/cc
+```
+
 ### Update
 
-Rerun either install command. The installer is safe to run again and will refresh the installed copy in place.
+Re-run the install command — it's idempotent.
 
 ```bash
 npx cc-plugin-codex update
-curl -fsSL "https://raw.githubusercontent.com/sendbird/cc-plugin-codex/main/scripts/install.sh" | bash
 ```
 
 ### Uninstall
 
 ```bash
 npx cc-plugin-codex uninstall
-curl -fsSL "https://raw.githubusercontent.com/sendbird/cc-plugin-codex/main/scripts/uninstall.sh" | bash
 ```
 
-### Manual Install
+## Troubleshooting
 
-If you want to work from a local checkout instead of the one-shot installer:
-
-```bash
-mkdir -p ~/.codex/plugins
-git clone https://github.com/sendbird/cc-plugin-codex.git ~/.codex/plugins/cc
-cd ~/.codex/plugins/cc
-node scripts/local-plugin-install.mjs install --plugin-root ~/.codex/plugins/cc
-```
-
-If Claude Code is not installed yet:
-
+**`$cc:setup` reports Claude Code not found**
 ```bash
 npm install -g @anthropic-ai/claude-code
 claude auth login
 ```
 
-Then run:
+**Commands not recognized in Codex**
+Re-run install. If your Codex build doesn't support `plugin/install`, the installer falls back to config-based activation and generates skill wrapper files automatically. You'll see a warning in the install output.
 
+**Hooks not firing**
+Check that `codex_hooks = true` is set in `~/.codex/config.toml` under `[features]`. Run `$cc:setup` to verify and auto-repair.
+
+**A background job finished but I did not get the result nudge**
+Use:
 ```text
-$cc:setup
-```
-
-After install, you should see:
-
-- the `$cc:*` skills listed in Codex
-- the global `cc-rescue` agent installed under `~/.codex/agents/cc-rescue.toml`
-
-One simple first run is:
-
-```text
-$cc:review --background
 $cc:status
 $cc:result
 ```
+The built-in notify path is best-effort. The tracked job store and unread hook remain the reliable fallback.
 
-## Usage
+**Review gate draining tokens**
+Disable it: `$cc:setup --disable-review-gate`. The gate fires on every Ctrl+C, which adds up.
 
-### `$cc:review`
-
-Runs a normal Claude Code review on your current work.
-
-Use it when you want:
-
-- a review of your current uncommitted changes
-- a review of your branch compared to a base branch like `main`
-
-It supports `--base <ref>`, `--scope <auto|working-tree|branch>`, `--wait`, `--background`, and `--model <model>`.
-
-Examples:
-
-```text
-$cc:review
-$cc:review --base main
-$cc:review --background
-```
-
-This command is read-only. When run in the background, use `$cc:status` to check progress and `$cc:cancel` to stop it.
-
-### `$cc:adversarial-review`
-
-Runs a steerable review that questions the chosen implementation and design.
-
-Use it when you want:
-
-- a review before shipping that challenges the direction, not just the code details
-- review focused on design choices, tradeoffs, hidden assumptions, and alternative approaches
-- pressure-testing around specific risk areas like auth, data loss, rollback, race conditions, or reliability
-
-It uses the same target selection as `$cc:review`, including `--base <ref>`, and also accepts extra focus text after the flags.
-
-Examples:
-
-```text
-$cc:adversarial-review
-$cc:adversarial-review --base main challenge whether this was the right caching and retry design
-$cc:adversarial-review --background look for race conditions and question the chosen approach
-```
-
-This command is read-only. It does not fix code.
-
-### `$cc:rescue`
-
-Hands a task to Claude Code through the global `cc-rescue` agent.
-
-Use it when you want Claude Code to:
-
-- investigate a bug
-- try a fix
-- continue a previous Claude task
-- take a cheaper or faster pass with a smaller Claude model
-
-It supports `--background`, `--wait`, `--resume`, `--resume-last`, `--fresh`, `--write`, `--model <model>`, `--effort <low|medium|high|max>`, and `--prompt-file <path>`.
-
-Examples:
-
-```text
-$cc:rescue investigate why the tests started failing
-$cc:rescue fix the failing test with the smallest safe patch
-$cc:rescue --resume apply the top fix from the last run
-$cc:rescue --model sonnet --effort medium investigate the flaky integration test
-$cc:rescue --background investigate the regression
-```
-
-### `$cc:status`
-
-Shows running and recent Claude Code jobs for the current repository.
-
-Examples:
-
-```text
-$cc:status
-$cc:status task-abc123
-```
-
-### `$cc:result`
-
-Shows the final stored Claude Code output for a finished job.
-
-When available, it also includes the Claude session ID so you can reopen that run directly with:
-
-```bash
-claude --resume <session-id>
-```
-
-Examples:
-
-```text
-$cc:result
-$cc:result task-abc123
-```
-
-### `$cc:cancel`
-
-Cancels an active background Claude Code job.
-
-Examples:
-
-```text
-$cc:cancel
-$cc:cancel task-abc123
-```
-
-### `$cc:setup`
-
-Checks whether Claude Code is installed and authenticated.
-
-It also verifies:
-
-- hook installation
-- global `cc-rescue` registration
-- current review-gate state for this workspace
-
-#### Enabling Review Gate
-
-```text
-$cc:setup --enable-review-gate
-$cc:setup --disable-review-gate
-```
-
-When the review gate is enabled, the plugin uses a `Stop` hook to run a targeted Claude Code review based on Codex's previous response. If that review finds issues, the stop is blocked so Codex can address them first.
-
-> [!WARNING]
-> The review gate can create a long-running Codex/Claude loop and may drain usage limits quickly. Only enable it when you plan to actively monitor the session.
-
-## Typical Flows
-
-### Review Before Shipping
-
-```text
-$cc:review --background
-$cc:status
-$cc:result
-```
-
-### Challenge A Design Choice
-
-```text
-$cc:adversarial-review --background question the retry, rollback, and caching strategy
-```
-
-### Hand A Problem To Claude Code
-
-```text
-$cc:rescue fix the failing test with the smallest safe patch
-```
-
-### Continue A Previous Claude Task
-
-```text
-$cc:rescue --resume apply the top fix from the last run
-```
+**Background jobs not cleaned up**
+Jobs are terminated when the Codex session that owns them exits. If a session crashes without cleanup, use `$cc:status` and `$cc:cancel <job-id>` to clean up any leftovers.
 
 ## License
 
-Apache-2.0
+[Apache-2.0](LICENSE) — see [NOTICE](NOTICE) for attribution.

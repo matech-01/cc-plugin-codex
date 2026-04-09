@@ -28,14 +28,13 @@ Command selection:
 - The caller's background or foreground choice changes only subagent execution. It does not change the companion command you build.
 
 Routing controls:
-- Treat `--model`, `--effort`, `--resume`, `--resume-last`, `--fresh`, `--prompt-file`, `--view-state`, and `--owner-session-id` as routing controls, not task text.
-- Treat `--quiet-progress` as an internal routing control, not task text.
+- Treat `--model`, `--effort`, `--resume`, `--resume-last`, `--fresh`, `--prompt-file`, `--view-state`, `--owner-session-id`, and `--job-id` as routing controls, not task text.
 - Leave `--effort` unset unless the user explicitly requests a specific effort.
 - Leave model unset by default. Add `--model` only when the user explicitly asks for one.
 - `--view-state on-success` means the user will see this companion result in the current turn, so the companion may mark it viewed on success.
 - `--view-state defer` means the parent is not waiting, so the companion must leave the result unread until the user explicitly checks it.
 - `--owner-session-id <session-id>` is an internal parent-session routing control. Preserve it when present so tracked jobs remain visible to the parent session's `$cc:status` / `$cc:result`.
-- `--quiet-progress` suppresses companion stderr progress output so the rescue forwarder can return only the final stdout in foreground mode. Preserve it when present.
+- Do not add `--quiet-progress` by default for built-in rescue forwarding. Let companion stderr progress remain available in the spawned agent thread.
 - If the free-text task begins with `/`, treat that slash command as literal Claude Code task text to forward unchanged. Do not execute it as a local Codex slash command or answer it inline.
 - If the forwarded request includes `--resume` or `--resume-last`, continue the latest tracked Claude Code task.
 - If the forwarded request includes `--fresh`, start a new task.
@@ -46,6 +45,10 @@ Routing controls:
 Task defaults:
 - Default to `--write` unless the user explicitly wants read-only behavior or only review, diagnosis, or research without edits.
 - Preserve the user's task text apart from stripping routing flags.
+- If the resolved task text is multi-line, contains shell-hostile quoting, or includes XML-style blocks, prefer staging it in a temporary prompt file and pass it through `--prompt-file` instead of inlining it in one shell string.
+- When staging a prompt file, keep the exact task text byte-for-byte and prefer a temporary path outside the repository checkout so the rescue flow does not dirty the repo.
+- Use a structured file-write path to create that prompt file when possible. Do not solve shell quoting by wrapping the same long task inside another brittle inline shell command.
+- If the tool output includes stderr progress chatter and a final stdout-style result, ignore the progress chatter and preserve only the final stdout-equivalent result text.
 - Return the stdout of the `task` command exactly as-is.
 - Do not poll status, fetch results, cancel jobs, or add commentary after the companion output.
 - If the companion reports missing setup or authentication, tell the user to run `$cc:setup`.

@@ -57,7 +57,10 @@ import {
   getCurrentSession,
   listJobs,
   patchJob,
+  JOB_RESERVATION_SUFFIX,
+  resolveJobsDir,
   resolveJobLogFile,
+  sanitizeId,
   setConfig,
   transitionJob,
   writeJobFile,
@@ -99,7 +102,6 @@ const DEFAULT_STATUS_POLL_INTERVAL_MS = 2000;
 const STOP_REVIEW_TASK_MARKER = "Run a stop-gate review of the previous Claude turn.";
 const CODEX_DIR = resolveCodexHome();
 const CODEX_CONFIG_TOML = path.join(CODEX_DIR, "config.toml");
-
 // ---------------------------------------------------------------------------
 // Usage
 // ---------------------------------------------------------------------------
@@ -115,7 +117,9 @@ function printUsage() {
       "  node scripts/claude-companion.mjs status [job-id] [--all] [--json]",
       "  node scripts/claude-companion.mjs result [job-id] [--json]",
       "  node scripts/claude-companion.mjs cancel [job-id] [--json]",
-      "  node scripts/claude-companion.mjs task-resume-candidate [--json]"
+      "  node scripts/claude-companion.mjs task-resume-candidate [--json]",
+      "  node scripts/claude-companion.mjs task-reserve-job [--json]",
+      "  node scripts/claude-companion.mjs review-reserve-job [--json]"
     ].join("\n")
   );
 }
@@ -149,6 +153,37 @@ function normalizeRequestedModel(model) {
     return null;
   }
   return MODEL_ALIASES.get(normalized.toLowerCase()) ?? normalized;
+}
+
+function resolveReservedJobFile(workspaceRoot, jobId) {
+  const safeJobId = sanitizeId(jobId, "job ID");
+  return path.join(resolveJobsDir(workspaceRoot), `${safeJobId}${JOB_RESERVATION_SUFFIX}`);
+}
+
+function resolveExplicitJobId(value, workspaceRoot) {
+  if (value == null || String(value).trim() === "") {
+    return null;
+  }
+  const explicitJobId = sanitizeId(String(value).trim(), "job ID");
+  if (readStoredJob(workspaceRoot, explicitJobId)) {
+    throw new Error(`Claude Code job id ${explicitJobId} already exists.`);
+  }
+  if (!fs.existsSync(resolveReservedJobFile(workspaceRoot, explicitJobId))) {
+    throw new Error(
+      `Claude Code job id ${explicitJobId} is not reserved. Reserve one with the companion reserve-job helper before reusing it.`
+    );
+  }
+  return explicitJobId;
+}
+
+async function withReleasedReservation(workspaceRoot, explicitJobId, fn) {
+  try {
+    return await fn();
+  } finally {
+    if (explicitJobId) {
+      releaseReservedJobId(workspaceRoot, explicitJobId);
+    }
+  }
 }
 
 
@@ -665,10 +700,12 @@ function createCompanionJob({
   summary,
   write = false,
   sessionId = null,
+  explicitJobId = null,
 }) {
+  const resolvedJobId = explicitJobId ?? generateJobId(prefix);
   return createJobRecord(
     {
-      id: generateJobId(prefix),
+      id: resolvedJobId,
       kind,
       kindLabel: getJobKindLabel(kind, jobClass),
       title,
@@ -683,6 +720,36 @@ function createCompanionJob({
     }
   );
 }
+
+function reserveUniqueJobId(workspaceRoot, prefix, label) {
+  const jobsDir = resolveJobsDir(workspaceRoot);
+  fs.mkdirSync(jobsDir, { recursive: true, mode: 0o700 });
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const candidate = generateJobId(prefix);
+    const reservationPath = resolveReservedJobFile(workspaceRoot, candidate);
+    try {
+      fs.writeFileSync(
+        reservationPath,
+        JSON.stringify({ jobId: candidate, reservedAt: nowIso() }, null, 2) + "\n",
+        { encoding: "utf8", flag: "wx" }
+      );
+    } catch (error) {
+      if (error?.code === "EEXIST") {
+        continue;
+      }
+      throw error;
+    }
+    return candidate;
+  }
+  throw new Error(`Failed to reserve a unique Claude Code ${label} job id.`);
+}
+
+function releaseReservedJobId(workspaceRoot, jobId) {
+  try {
+    fs.rmSync(resolveReservedJobFile(workspaceRoot, jobId), { force: true });
+  } catch {}
+}
+
 
 function createTrackedProgress(job, options = {}) {
   const logFile = createJobLogFile(job.workspaceRoot, job.id, job.title);
@@ -763,7 +830,13 @@ function enqueueBackgroundReview(cwd, job, request) {
   };
 }
 
-function buildTaskJob(workspaceRoot, taskMetadata, write, ownerSessionId = null) {
+function buildTaskJob(
+  workspaceRoot,
+  taskMetadata,
+  write,
+  ownerSessionId = null,
+  explicitJobId = null
+) {
   return createCompanionJob({
     prefix: "task",
     kind: "task",
@@ -772,7 +845,8 @@ function buildTaskJob(workspaceRoot, taskMetadata, write, ownerSessionId = null)
     jobClass: "task",
     summary: taskMetadata.summary,
     write,
-    sessionId: ownerSessionId
+    sessionId: ownerSessionId,
+    explicitJobId
   });
 }
 
@@ -821,7 +895,7 @@ function renderQueuedTaskLaunch(payload) {
   return [
     `${payload.title} started in the background as ${payload.jobId}.`,
     `Check $cc:status ${payload.jobId} for progress.`,
-    `Use $cc:result ${payload.jobId} once it finishes.`,
+    `Once it finishes, we'll point you to the result. You can also open it directly with $cc:result ${payload.jobId}.`,
     ""
   ].join("\n");
 }
@@ -1025,7 +1099,7 @@ async function resolveLatestResumableSession(cwd, options = {}) {
 
 async function handleReviewCommand(argv, config) {
   const { options, positionals } = parseCommandInput(argv, {
-    valueOptions: ["base", "scope", "model", "cwd", "view-state"],
+    valueOptions: ["base", "scope", "model", "cwd", "view-state", "job-id"],
     booleanOptions: ["json", "background", "wait"],
     aliasMap: {
       m: "model"
@@ -1040,58 +1114,62 @@ async function handleReviewCommand(argv, config) {
     base: options.base,
     scope: options.scope
   });
+  const explicitJobId = resolveExplicitJobId(options["job-id"], workspaceRoot);
   const markViewedOnSuccess = resolveMarkViewedOnSuccess(
     options["view-state"],
     Boolean(options.background)
   );
 
-  // Validate before arming (issue: early failures shouldn't leave stale markers)
-  config.validateRequest?.(target, focusText);
-  const metadata = buildReviewJobMetadata(config.reviewName, target);
+  await withReleasedReservation(workspaceRoot, explicitJobId, async () => {
+    // Validate inside the reservation guard so failures do not leak markers.
+    config.validateRequest?.(target, focusText);
+    const metadata = buildReviewJobMetadata(config.reviewName, target);
 
-  const job = createCompanionJob({
-    prefix: "review",
-    kind: metadata.kind,
-    title: metadata.title,
-    workspaceRoot,
-    jobClass: "review",
-    summary: metadata.summary
-  });
-
-  if (options.background) {
-    const request = buildReviewRequest({
-      cwd,
-      base: options.base,
-      scope: options.scope,
-      model: options.model,
-      focusText,
-      reviewName: config.reviewName,
-      markViewedOnSuccess
+    const job = createCompanionJob({
+      prefix: "review",
+      kind: metadata.kind,
+      title: metadata.title,
+      workspaceRoot,
+      jobClass: "review",
+      summary: metadata.summary,
+      explicitJobId
     });
-    const { payload } = enqueueBackgroundReview(cwd, job, request);
-    outputCommandResult(
-      payload,
-      renderQueuedTaskLaunch(payload),
-      options.json
-    );
-    return;
-  }
 
-  await runForegroundCommand(
-    job,
-    (progress, onSpawn) =>
-      executeReviewRun({
+    if (options.background) {
+      const request = buildReviewRequest({
         cwd,
         base: options.base,
         scope: options.scope,
         model: options.model,
         focusText,
         reviewName: config.reviewName,
-        onProgress: progress,
-        onSpawn,
-      }),
-    { json: options.json, markViewedOnSuccess }
-  );
+        markViewedOnSuccess
+      });
+      const { payload } = enqueueBackgroundReview(cwd, job, request);
+      outputCommandResult(
+        payload,
+        renderQueuedTaskLaunch(payload),
+        options.json
+      );
+      return;
+    }
+
+    await runForegroundCommand(
+      job,
+      (progress, onSpawn) =>
+        executeReviewRun({
+          cwd,
+          base: options.base,
+          scope: options.scope,
+          model: options.model,
+          focusText,
+          reviewName: config.reviewName,
+          onProgress: progress,
+          onSpawn,
+        }),
+      { json: options.json, markViewedOnSuccess }
+    );
+  });
 }
 
 function validateStandardReviewRequest(target, focusText) {
@@ -1117,7 +1195,7 @@ async function handleAdversarialReview(argv) {
 
 async function handleTask(argv) {
   const { options, positionals } = parseCommandInput(argv, {
-    valueOptions: ["model", "effort", "cwd", "prompt-file", "view-state", "owner-session-id"],
+    valueOptions: ["model", "effort", "cwd", "prompt-file", "view-state", "owner-session-id", "job-id"],
     booleanOptions: [
       "json",
       "quiet-progress",
@@ -1157,51 +1235,38 @@ async function handleTask(argv) {
 
   const write = Boolean(options.write);
   const ownerSessionId = options["owner-session-id"] || null;
-  const taskMetadata = buildTaskRunMetadata({
-    prompt,
-    resumeLast
-  });
-
-  // Resolve resume session BEFORE arming (failure here shouldn't leave stale marker)
-  let resumeSessionId = null;
-  if (resumeLast) {
-    resumeSessionId = await resolveLatestResumableSession(workspaceRoot);
-    if (!resumeSessionId) {
-      throw new Error(
-        "No previous Claude Code task session was found for this repository."
-      );
-    }
-  }
-
-  if (options.background) {
-    requireTaskRequest(prompt, resumeLast);
-
-    const job = buildTaskJob(workspaceRoot, taskMetadata, write, ownerSessionId);
-    const request = buildTaskRequest({
-      cwd,
-      model,
-      effort,
+  const explicitJobId = resolveExplicitJobId(options["job-id"], workspaceRoot);
+  await withReleasedReservation(workspaceRoot, explicitJobId, async () => {
+    const taskMetadata = buildTaskRunMetadata({
       prompt,
-      write,
-      resumeLast,
-      resumeSessionId,
-      jobId: job.id,
-      markViewedOnSuccess
+      resumeLast
     });
-    const { payload } = enqueueBackgroundTask(cwd, job, request);
-    outputCommandResult(
-      payload,
-      renderQueuedTaskLaunch(payload),
-      options.json
-    );
-    return;
-  }
 
-  const job = buildTaskJob(workspaceRoot, taskMetadata, write, ownerSessionId);
-  await runForegroundCommand(
-    job,
-    (progress, onSpawn) =>
-      executeTaskRun({
+    // Resolve resume session inside the reservation guard so failures do not leak markers.
+    let resumeSessionId = null;
+    if (resumeLast) {
+      resumeSessionId = await resolveLatestResumableSession(workspaceRoot);
+      if (!resumeSessionId) {
+        throw new Error(
+          "No previous Claude Code task session was found for this repository."
+        );
+      }
+    }
+
+    if (options.background) {
+      requireTaskRequest(prompt, resumeLast);
+    }
+
+    const job = buildTaskJob(
+      workspaceRoot,
+      taskMetadata,
+      write,
+      ownerSessionId,
+      explicitJobId
+    );
+
+    if (options.background) {
+      const request = buildTaskRequest({
         cwd,
         model,
         effort,
@@ -1209,16 +1274,40 @@ async function handleTask(argv) {
         write,
         resumeLast,
         resumeSessionId,
-        onSpawn,
         jobId: job.id,
-        onProgress: progress
-      }),
-    {
-      json: options.json,
-      markViewedOnSuccess,
-      quietProgress: Boolean(options["quiet-progress"])
+        markViewedOnSuccess
+      });
+      const { payload } = enqueueBackgroundTask(cwd, job, request);
+      outputCommandResult(
+        payload,
+        renderQueuedTaskLaunch(payload),
+        options.json
+      );
+      return;
     }
-  );
+
+    await runForegroundCommand(
+      job,
+      (progress, onSpawn) =>
+        executeTaskRun({
+          cwd,
+          model,
+          effort,
+          prompt,
+          write,
+          resumeLast,
+          resumeSessionId,
+          onSpawn,
+          jobId: job.id,
+          onProgress: progress
+        }),
+      {
+        json: options.json,
+        markViewedOnSuccess,
+        quietProgress: Boolean(options["quiet-progress"])
+      }
+    );
+  });
 }
 
 async function handleTaskWorker(argv) {
@@ -1424,6 +1513,21 @@ function handleTaskResumeCandidate(argv) {
   outputCommandResult(payload, rendered, options.json);
 }
 
+function handleReserveJob(argv, prefix) {
+  const { options } = parseCommandInput(argv, {
+    valueOptions: ["cwd"],
+    booleanOptions: ["json"]
+  });
+
+  const cwd = resolveCommandCwd(options);
+  const workspaceRoot = resolveCommandWorkspace({ cwd });
+  const payload = {
+    jobId: reserveUniqueJobId(workspaceRoot, prefix, prefix),
+  };
+
+  outputResult(payload, options.json);
+}
+
 async function handleCancel(argv) {
   const { options, positionals } = parseCommandInput(argv, {
     valueOptions: ["cwd"],
@@ -1550,6 +1654,12 @@ async function main() {
       break;
     case "task-resume-candidate":
       handleTaskResumeCandidate(argv);
+      break;
+    case "task-reserve-job":
+      handleReserveJob(argv, "task");
+      break;
+    case "review-reserve-job":
+      handleReserveJob(argv, "review");
       break;
     case "cancel":
       await handleCancel(argv);

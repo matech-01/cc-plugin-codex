@@ -37,6 +37,8 @@ const TURN_BASELINE_FILE_PREFIX = "turn-baseline";
 const MAX_TERMINAL_JOBS_PER_SESSION = 100;
 export const MAX_STOP_REVIEW_HISTORY_ENTRIES = 200;
 const REAP_GRACE_MS = 2_000;
+const RESERVED_JOB_FILE_MAX_AGE_MS = 60 * 60 * 1000;
+export const JOB_RESERVATION_SUFFIX = ".reserve";
 export const ACTIVE_JOB_STATUSES = new Set(["queued", "running", "cancelling"]);
 const NO_SESSION_RETENTION_BUCKET = "__no-session__";
 
@@ -287,7 +289,7 @@ export function clearCurrentSession(cwd, sessionId = null) {
 // Input sanitization
 // ---------------------------------------------------------------------------
 
-function sanitizeId(id, label = "ID") {
+export function sanitizeId(id, label = "ID") {
   if (typeof id !== "string" || !/^[\w\-.]+$/.test(id)) {
     throw new Error(`Invalid ${label}: ${String(id).slice(0, 50)}`);
   }
@@ -689,4 +691,23 @@ export function cleanupOldJobs(cwd) {
       fs.unlinkSync(defaultLogFile);
     } catch {}
   }
+
+  const jobsDir = resolveJobsDir(cwd);
+  try {
+    for (const entry of fs.readdirSync(jobsDir, { withFileTypes: true })) {
+      if (!entry.isFile() || !entry.name.endsWith(JOB_RESERVATION_SUFFIX)) {
+        continue;
+      }
+      try {
+        const reservationPath = path.join(jobsDir, entry.name);
+        const stat = fs.statSync(reservationPath);
+        if (Date.now() - stat.mtimeMs <= RESERVED_JOB_FILE_MAX_AGE_MS) {
+          continue;
+        }
+        fs.unlinkSync(reservationPath);
+      } catch {
+        continue;
+      }
+    }
+  } catch {}
 }

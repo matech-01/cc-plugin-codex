@@ -81,4 +81,71 @@ describe("collectReviewContext", () => {
     assert.ok(context.content.includes("asset.bin"));
     assert.ok(!context.content.includes("GIT binary patch"));
   });
+
+  it("gracefully handles untracked directory contents and symlinks in working-tree review context", () => {
+    const repo = createRepo();
+
+    fs.writeFileSync(path.join(repo, "tracked.txt"), "tracked\n", "utf8");
+    runGit(repo, ["add", "tracked.txt"]);
+    runGit(repo, ["commit", "-m", "tracked"]);
+
+    fs.mkdirSync(path.join(repo, "notes"), { recursive: true });
+    fs.writeFileSync(path.join(repo, "notes", "todo.md"), "todo\n", "utf8");
+    fs.symlinkSync("tracked.txt", path.join(repo, "tracked-link"));
+
+    const context = collectReviewContext(repo, {
+      mode: "working-tree",
+      label: "working tree diff",
+      explicit: true,
+    });
+
+    assert.match(context.content, /notes\/todo\.md[\s\S]*```/);
+    assert.match(context.content, /tracked-link[\s\S]*skipped: symlink/);
+  });
+
+  it("omits very large working-tree diffs and tells the reviewer to inspect git directly", () => {
+    const repo = createRepo();
+    const largeText = `${"x".repeat(200)}\n`.repeat(500);
+
+    fs.writeFileSync(path.join(repo, "app.js"), "export const value = 1;\n", "utf8");
+    runGit(repo, ["add", "app.js"]);
+    runGit(repo, ["commit", "-m", "initial"]);
+
+    fs.writeFileSync(path.join(repo, "app.js"), largeText, "utf8");
+
+    const context = collectReviewContext(repo, {
+      mode: "working-tree",
+      label: "working tree diff",
+      explicit: true,
+    });
+
+    assert.match(context.content, /Large diff omitted\./);
+    assert.match(context.content, /git diff --cached --no-ext-diff --submodule=diff/);
+    assert.match(context.content, /git diff --no-ext-diff --submodule=diff/);
+  });
+
+  it("omits very large branch diffs and tells the reviewer to inspect git directly", () => {
+    const repo = createRepo();
+    const largeText = `${"y".repeat(200)}\n`.repeat(500);
+
+    fs.writeFileSync(path.join(repo, "app.js"), "export const value = 1;\n", "utf8");
+    runGit(repo, ["add", "app.js"]);
+    runGit(repo, ["commit", "-m", "initial"]);
+    runGit(repo, ["checkout", "-b", "feature"]);
+
+    fs.writeFileSync(path.join(repo, "app.js"), largeText, "utf8");
+    runGit(repo, ["add", "app.js"]);
+    runGit(repo, ["commit", "-m", "large change"]);
+
+    const context = collectReviewContext(repo, {
+      mode: "branch",
+      label: "branch diff against main",
+      baseRef: "main",
+      explicit: true,
+    });
+
+    assert.match(context.content, /Large diff omitted\./);
+    assert.match(context.content, /git diff --no-ext-diff --submodule=diff/);
+    assert.doesNotMatch(context.content, /@@/);
+  });
 });
