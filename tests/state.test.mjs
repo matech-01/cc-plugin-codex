@@ -712,6 +712,64 @@ describe("cleanupOldJobs", () => {
       fs.rmSync(repoDir, { recursive: true, force: true });
     }
   });
+
+  it("removes stale reserved job marker files", () => {
+    const repoDir = createTempGitRepo();
+    try {
+      const jobsDir = resolveJobsDir(repoDir);
+      fs.mkdirSync(jobsDir, { recursive: true });
+      const staleReservation = path.join(jobsDir, "review-stale.reserve");
+      const freshReservation = path.join(jobsDir, "review-fresh.reserve");
+      fs.writeFileSync(staleReservation, "{}", "utf8");
+      fs.writeFileSync(freshReservation, "{}", "utf8");
+
+      const twoHoursAgo = Date.now() - 2 * 60 * 60 * 1000;
+      fs.utimesSync(staleReservation, twoHoursAgo / 1000, twoHoursAgo / 1000);
+
+      cleanupOldJobs(repoDir);
+
+      assert.equal(fs.existsSync(staleReservation), false);
+      assert.equal(fs.existsSync(freshReservation), true);
+    } finally {
+      fs.rmSync(resolveStateDir(repoDir), { recursive: true, force: true });
+      fs.rmSync(repoDir, { recursive: true, force: true });
+    }
+  });
+
+  it("continues cleaning later reserved markers when one entry errors", () => {
+    const repoDir = createTempGitRepo();
+    const originalStatSync = fs.statSync;
+    try {
+      const jobsDir = resolveJobsDir(repoDir);
+      fs.mkdirSync(jobsDir, { recursive: true });
+      const badReservation = path.join(jobsDir, "review-bad.reserve");
+      const staleReservation = path.join(jobsDir, "review-stale.reserve");
+      fs.writeFileSync(badReservation, "{}", "utf8");
+      fs.writeFileSync(staleReservation, "{}", "utf8");
+
+      const twoHoursAgo = Date.now() - 2 * 60 * 60 * 1000;
+      fs.utimesSync(badReservation, twoHoursAgo / 1000, twoHoursAgo / 1000);
+      fs.utimesSync(staleReservation, twoHoursAgo / 1000, twoHoursAgo / 1000);
+
+      fs.statSync = (targetPath, ...args) => {
+        if (targetPath === badReservation) {
+          const error = new Error("synthetic stat failure");
+          error.code = "EIO";
+          throw error;
+        }
+        return originalStatSync(targetPath, ...args);
+      };
+
+      cleanupOldJobs(repoDir);
+
+      assert.equal(fs.existsSync(badReservation), true);
+      assert.equal(fs.existsSync(staleReservation), false);
+    } finally {
+      fs.statSync = originalStatSync;
+      fs.rmSync(resolveStateDir(repoDir), { recursive: true, force: true });
+      fs.rmSync(repoDir, { recursive: true, force: true });
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------

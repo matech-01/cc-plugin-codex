@@ -237,6 +237,10 @@ function stateDirFor(testEnv) {
   );
 }
 
+function reservationPathFor(testEnv, jobId) {
+  return path.join(stateDirFor(testEnv), "jobs", `${jobId}.reserve`);
+}
+
 function listStoredJobs(testEnv) {
   const jobsDir = path.join(stateDirFor(testEnv), "jobs");
   if (!fs.existsSync(jobsDir)) {
@@ -279,6 +283,26 @@ function runCompanion(args, options = {}) {
 function runCompanionJson(args, options = {}) {
   const result = runCompanion(args, options);
   return JSON.parse(result.stdout);
+}
+
+function runCompanionExpectFailure(args, options = {}) {
+  const result = spawnSync(
+    process.execPath,
+    [COMPANION_SCRIPT, ...args],
+    {
+      cwd: PROJECT_ROOT,
+      env: options.env ?? process.env,
+      encoding: "utf8",
+      timeout: options.timeoutMs ?? 30_000,
+    }
+  );
+
+  assert.notEqual(
+    result.status,
+    0,
+    `Expected command to fail: node scripts/claude-companion.mjs ${args.join(" ")}`
+  );
+  return result;
 }
 
 function runCompanionAsync(args, options = {}) {
@@ -1220,6 +1244,383 @@ describe("claude-companion integration", () => {
         null,
         "explicit defer should keep the result unread even when companion ran in foreground"
       );
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("can reserve a task job id and reuse it for a foreground task", async () => {
+    const testEnv = createTestEnvironment();
+    const sessionEnv = {
+      ...testEnv.env,
+      [SESSION_ID_ENV]: "session-reserved-foreground",
+    };
+
+    try {
+      const reserved = runCompanionJson(
+        ["task-reserve-job", "--cwd", testEnv.workspaceDir, "--json"],
+        { env: sessionEnv }
+      );
+      assert.match(reserved.jobId ?? "", /^task-/);
+
+      runCompanion(
+        [
+          "task",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--job-id",
+          reserved.jobId,
+          "reserved-foreground delay=20",
+        ],
+        { env: sessionEnv }
+      );
+
+      const storedJob = readStoredJobById(testEnv, reserved.jobId);
+      assert.equal(storedJob.id, reserved.jobId);
+      assert.equal(storedJob.status, "completed");
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("can reserve a task job id and reuse it for a background task", async () => {
+    const testEnv = createTestEnvironment();
+    const sessionEnv = {
+      ...testEnv.env,
+      [SESSION_ID_ENV]: "session-reserved-background",
+    };
+
+    try {
+      const reserved = runCompanionJson(
+        ["task-reserve-job", "--cwd", testEnv.workspaceDir, "--json"],
+        { env: sessionEnv }
+      );
+      assert.match(reserved.jobId ?? "", /^task-/);
+
+      const launch = await runCompanionAsyncJson(
+        [
+          "task",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--background",
+          "--json",
+          "--job-id",
+          reserved.jobId,
+          "reserved-background delay=40",
+        ],
+        { env: sessionEnv }
+      );
+      assert.equal(launch.jobId, reserved.jobId);
+
+      const result = await waitForTerminalResult(testEnv, reserved.jobId, sessionEnv);
+      assert.equal(result.job.id, reserved.jobId);
+      assert.equal(result.job.status, "completed");
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("releases a reserved task job id even when the background task fails", async () => {
+    const testEnv = createTestEnvironment();
+    const sessionEnv = {
+      ...testEnv.env,
+      [SESSION_ID_ENV]: "session-reserved-task-failure",
+    };
+
+    try {
+      const reserved = runCompanionJson(
+        ["task-reserve-job", "--cwd", testEnv.workspaceDir, "--json"],
+        { env: sessionEnv }
+      );
+      const reservePath = reservationPathFor(testEnv, reserved.jobId);
+      assert.equal(fs.existsSync(reservePath), true);
+
+      const launch = await runCompanionAsyncJson(
+        [
+          "task",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--background",
+          "--json",
+          "--job-id",
+          reserved.jobId,
+          "unknown-no-terminal delay=20",
+        ],
+        { env: sessionEnv }
+      );
+      assert.equal(launch.jobId, reserved.jobId);
+
+      const statusPayload = await waitForTerminalStatus(
+        testEnv,
+        reserved.jobId,
+        sessionEnv
+      );
+      assert.equal(statusPayload.job.status, "failed");
+      assert.equal(fs.existsSync(reservePath), false);
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("rejects an explicit task job id that was never reserved", () => {
+    const testEnv = createTestEnvironment();
+    const sessionEnv = {
+      ...testEnv.env,
+      [SESSION_ID_ENV]: "session-unreserved-task",
+    };
+
+    try {
+      const result = runCompanionExpectFailure(
+        [
+          "task",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--job-id",
+          "task-manual-unreserved",
+          "hello",
+        ],
+        { env: sessionEnv }
+      );
+
+      assert.match(
+        result.stderr,
+        /is not reserved\. Reserve one with the companion reserve-job helper/i
+      );
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("releases a reserved task job id when resume validation fails before execution", () => {
+    const testEnv = createTestEnvironment();
+    const sessionEnv = {
+      ...testEnv.env,
+      [SESSION_ID_ENV]: "session-reserved-task-resume-miss",
+    };
+
+    try {
+      const reserved = runCompanionJson(
+        ["task-reserve-job", "--cwd", testEnv.workspaceDir, "--json"],
+        { env: sessionEnv }
+      );
+      const reservePath = reservationPathFor(testEnv, reserved.jobId);
+      assert.equal(fs.existsSync(reservePath), true);
+
+      const result = runCompanionExpectFailure(
+        [
+          "task",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--resume",
+          "--job-id",
+          reserved.jobId,
+        ],
+        { env: sessionEnv }
+      );
+
+      assert.match(result.stderr, /No previous Claude Code task session was found/i);
+      assert.equal(fs.existsSync(reservePath), false);
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("can reserve a review job id and reuse it for a foreground review", async () => {
+    const testEnv = createTestEnvironment();
+    setupGitWorkspace(testEnv.workspaceDir);
+    seedWorkingTreeDiff(testEnv.workspaceDir);
+
+    try {
+      const reserved = runCompanionJson(
+        ["review-reserve-job", "--cwd", testEnv.workspaceDir, "--json"],
+        { env: testEnv.env }
+      );
+      assert.match(reserved.jobId ?? "", /^review-/);
+
+      runCompanion(
+        [
+          "review",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--scope",
+          "working-tree",
+          "--job-id",
+          reserved.jobId,
+        ],
+        { env: testEnv.env }
+      );
+
+      const storedJob = readStoredJobById(testEnv, reserved.jobId);
+      assert.equal(storedJob.id, reserved.jobId);
+      assert.equal(storedJob.status, "completed");
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("can reserve a review job id and reuse it for a background review", async () => {
+    const testEnv = createTestEnvironment();
+    setupGitWorkspace(testEnv.workspaceDir);
+    seedWorkingTreeDiff(testEnv.workspaceDir);
+
+    try {
+      const reserved = runCompanionJson(
+        ["review-reserve-job", "--cwd", testEnv.workspaceDir, "--json"],
+        { env: testEnv.env }
+      );
+      assert.match(reserved.jobId ?? "", /^review-/);
+
+      const launch = await runCompanionAsyncJson(
+        [
+          "review",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--background",
+          "--json",
+          "--scope",
+          "working-tree",
+          "--job-id",
+          reserved.jobId,
+        ],
+        { env: testEnv.env }
+      );
+      assert.equal(launch.jobId, reserved.jobId);
+
+      const result = await waitForTerminalResult(testEnv, reserved.jobId, testEnv.env);
+      assert.equal(result.job.id, reserved.jobId);
+      assert.equal(result.job.status, "completed");
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("releases a reserved review job id even when the background review fails", async () => {
+    const testEnv = createTestEnvironment();
+    const sessionEnv = {
+      ...testEnv.env,
+      [SESSION_ID_ENV]: "session-reserved-review-failure",
+    };
+
+    try {
+      setupGitWorkspace(testEnv.workspaceDir);
+      fs.writeFileSync(
+        path.join(testEnv.workspaceDir, "notes.md"),
+        "unknown-no-terminal\n",
+        "utf8"
+      );
+
+      const reserved = runCompanionJson(
+        ["review-reserve-job", "--cwd", testEnv.workspaceDir, "--json"],
+        { env: sessionEnv }
+      );
+      const reservePath = reservationPathFor(testEnv, reserved.jobId);
+      assert.equal(fs.existsSync(reservePath), true);
+
+      const launch = await runCompanionAsyncJson(
+        [
+          "review",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--background",
+          "--json",
+          "--job-id",
+          reserved.jobId,
+        ],
+        { env: sessionEnv }
+      );
+      assert.equal(launch.jobId, reserved.jobId);
+
+      const statusPayload = await waitForTerminalStatus(
+        testEnv,
+        reserved.jobId,
+        sessionEnv
+      );
+      assert.equal(statusPayload.job.status, "failed");
+      assert.equal(fs.existsSync(reservePath), false);
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("rejects an explicit review job id that was never reserved", () => {
+    const testEnv = createTestEnvironment();
+    setupGitWorkspace(testEnv.workspaceDir);
+    seedWorkingTreeDiff(testEnv.workspaceDir);
+
+    try {
+      const result = runCompanionExpectFailure(
+        [
+          "review",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--scope",
+          "working-tree",
+          "--job-id",
+          "review-manual-unreserved",
+        ],
+        { env: testEnv.env }
+      );
+
+      assert.match(
+        result.stderr,
+        /is not reserved\. Reserve one with the companion reserve-job helper/i
+      );
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("releases a reserved review job id when standard review validation fails before execution", () => {
+    const testEnv = createTestEnvironment();
+    setupGitWorkspace(testEnv.workspaceDir);
+    seedWorkingTreeDiff(testEnv.workspaceDir);
+
+    try {
+      const reserved = runCompanionJson(
+        ["review-reserve-job", "--cwd", testEnv.workspaceDir, "--json"],
+        { env: testEnv.env }
+      );
+      const reservePath = reservationPathFor(testEnv, reserved.jobId);
+      assert.equal(fs.existsSync(reservePath), true);
+
+      const result = runCompanionExpectFailure(
+        [
+          "review",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--scope",
+          "working-tree",
+          "--job-id",
+          reserved.jobId,
+          "extra focus text",
+        ],
+        { env: testEnv.env }
+      );
+
+      assert.match(result.stderr, /Standard review does not support custom focus text/i);
+      assert.equal(fs.existsSync(reservePath), false);
+    } finally {
+      cleanupTestEnvironment(testEnv);
+    }
+  });
+
+  it("rejects unsafe explicit task job ids before touching reservation files", () => {
+    const testEnv = createTestEnvironment();
+
+    try {
+      const result = runCompanionExpectFailure(
+        [
+          "task",
+          "--cwd",
+          testEnv.workspaceDir,
+          "--job-id",
+          "../../escape",
+          "hello",
+        ],
+        { env: testEnv.env }
+      );
+
+      assert.match(result.stderr, /Invalid job ID/i);
     } finally {
       cleanupTestEnvironment(testEnv);
     }

@@ -49,22 +49,37 @@ Main-thread routing rules:
 - If the user chooses a new thread, add `--fresh` before spawning the subagent.
 - If the helper reports `available: false`, do not ask. Delegate normally.
 - Do not inspect the repo, do the task yourself, poll job status, or summarize the result in the same turn.
+- If a legacy request still includes `--notify-parent-on-complete`, treat it as a compatibility alias. Background built-in rescue now attempts parent wake-up by default.
 
 Subagent launch:
 - By default, use Codex's `spawn_agent` tool with `agent_type: "default"`.
 - If a legacy request still includes `--builtin-agent`, treat it as a compatibility alias for the default built-in path. It should not change behavior.
-- The built-in rescue path must set `model: "gpt-5.4"` and `reasoning_effort: "medium"` on `spawn_agent` so the transient forwarding child stays cheap and predictable.
+- Prefer `fork_context: false` for the built-in rescue child. The parent should pass a self-contained forwarding message instead of replaying the full parent thread by default.
+- Only consider `fork_context: true` as a last resort for a short follow-up where essential context truly cannot be summarized. Avoid it for large or long-lived threads because it can exhaust the child context window.
+- The built-in rescue path must set `model: "gpt-5.4-mini"` and `reasoning_effort: "medium"` on `spawn_agent` so the transient forwarding child stays cheap and predictable.
+- Before spawning the built-in child, emit one short commentary update that records the attempted subagent model selection. Default text should clearly say the parent is starting the built-in rescue child with `gpt-5.4-mini` at `medium` effort.
+- Prefer `gpt-5.4-mini` for that built-in child, but if `spawn_agent` rejects that model with an explicit model-availability error such as `Unknown model`, `model unavailable`, or equivalent "not in list / unavailable" wording, retry once with `model: "gpt-5.4"` and the same `reasoning_effort: "medium"`.
+- If that fallback happens, emit one short commentary update that clearly says `gpt-5.4-mini` was unavailable and the parent is retrying with `gpt-5.4`.
+- Do not use that fallback for arbitrary failures. If the error is not clearly a model-unavailable problem, surface it instead of silently retrying with `gpt-5.4`.
 - Remove `--background` and `--wait` before spawning the subagent. Those flags control only whether the main thread waits on the subagent.
 - Pass only the routing and task arguments that actually belong to `claude-companion.mjs task`.
 - If the free-text task begins with `/`, preserve it verbatim in the spawned subagent request. Do not strip the slash or rewrite it into a local Codex command.
-- Add the internal `--quiet-progress` flag for foreground rescue forwarding so the child subagent sees only the final companion stdout instead of streaming progress chatter.
 - Add an internal `--owner-session-id <parent-session-id>` routing flag when spawning the subagent so tracked Claude Code jobs stay attached to the user-facing parent session for `$cc:status` / `$cc:result`.
+- If the rescue is running in background through the built-in path and parent wake-up is desired, the parent should first reserve a task job id by running:
+  `node "<plugin-root>/scripts/claude-companion.mjs" task-reserve-job --json`
+- If that helper returns a non-empty `jobId`, pass it into the companion command as an internal `--job-id <reserved-job-id>` routing flag.
 - Add an internal companion routing flag that reflects whether the user will see this result in the current turn:
   - Foreground rescue must add `--view-state on-success`
   - Background rescue must add `--view-state defer`
 - Any user-supplied `--model` flag is for the Claude companion only and must be forwarded unchanged to `task`.
+- If the rescue is running in background through the built-in path, the parent should first capture its own thread id by running:
+  `node -e "process.stdout.write(process.env.CODEX_THREAD_ID || '')"`
+- If that command returns a non-empty thread id, pass it into the child prompt as the parent thread id for one-shot completion notification.
+- If it returns empty output or fails, continue without parent wake-up instead of blocking the rescue.
+- This parent wake-up attempt is now the default for background built-in rescue on persistent Codex/Desktop threads. It is still best-effort and should silently degrade on one-shot `codex exec` runs.
 - For the built-in rescue path, the parent thread owns prompt shaping. The built-in child should stay a pure executor.
 - If the built-in rescue request is vague, chatty, or a follow-up, the parent may tighten only the task text before composing the exact companion command.
+- Prefer passing a small structured `<parent_context>` block instead of forked thread history when the child needs a little prior context.
 - Use the `task-prompt-shaping` internal rules as guidance for that parent-side tightening:
   - preserve user intent and add no new repo facts
   - prefer a short delta instruction for resume follow-ups
@@ -72,16 +87,48 @@ Subagent launch:
   - do not add more words than value for already-clear requests
 - Parent-side shaping should be conservative and specific:
   - If the request is already concrete, keep it literal.
+  - If the request names a concrete file, path, or artifact such as `README.md`, and also includes explicit source/style/installation constraints, keep the full task text literal apart from stripping routing flags. Do not compress it into a shorter delta.
   - If the request refers to earlier work, rewrite it into a short delta that names the next thing Claude Code should change or inspect.
   - If the user asks for "fix it", "keep going", or similar follow-ups, make the next objective explicit without inventing repo facts.
   - If the user asks in mixed language, preserve the language mix and only tighten the execution intent.
   - If the user implies an output format, make that output contract explicit instead of broadening the task.
+- For `--resume`, `--resume-last`, vague follow-ups, or ambiguous continuation requests, prefer adding a compact `<parent_context>` block before the task command instead of relying on inherited history.
+- Keep `<parent_context>` small and structured. Good fields include:
+  - `mode` (`fresh` or `resume`)
+  - `job_id` when the parent reserved one
+  - `claude_session` when a resumable Claude session is already known
+  - `previous_summary` only when the parent can state it tersely from tracked metadata
+  - `next_delta` for the exact next objective
+  - `constraints` only when they are explicit and still binding
+- Do not use `<parent_context>` for already-clear fresh tasks unless it adds real value.
+- Keep `<parent_context>` deterministic and short. Do not turn it into a free-form summary of the whole parent thread.
 - For the built-in rescue path, parent-side shaping must happen before the command is handed to the child. The child must not do an additional interpretation pass.
+- If the resolved rescue task text is shell-hostile or likely to break a single inline shell string, materialize it into a temporary prompt file first and use `--prompt-file` instead of embedding the task directly in the command.
+- Treat any of the following as prompt-file triggers unless the user already supplied `--prompt-file`:
+  - multi-line task text
+  - single quotes, backticks, or XML-style blocks such as `<task>` / `<output_contract>`
+  - long concrete requests where inline shell quoting would be brittle
+- When using a prompt file, preserve the exact resolved task text byte-for-byte in that file and point the companion command at that file with an absolute `--prompt-file` path.
+- Prefer a temporary path outside the repository checkout, for example under `/tmp`, so rescue prompt staging does not dirty the repo.
+- Materialize that prompt file with a normal file-write tool or other structured write path. Do not try to generate it by re-embedding the long task text inside another fragile one-line shell string.
 - If the user is not satisfied with a built-in rescue result, the parent should treat the next rescue request as a follow-up and prefer `--resume` or `--resume-last` with a short delta instruction when a resumable Claude Code session exists.
 - The built-in rescue path must use a compact strict forwarding message. It must:
   - identify the child as a transient forwarding worker for Claude Code rescue
   - include exactly one shell command to run
-  - tell the child to return only that command's stdout text exactly, with no preamble, summary, code fence, trimming, normalization, or punctuation changes
+  - for foreground rescue only, tell the child to return that command's stdout text exactly, with no preamble, summary, code fence, trimming, normalization, or punctuation changes
+  - tell the child to ignore stderr progress chatter such as `[cc] ...` lines and preserve only the stdout-equivalent final result text
+  - if a parent thread id is provided for experimental background notification, allow one extra `send_input` call after a successful shell result and before finishing
+  - that `send_input` call must target the provided parent thread id, must happen at most once, and must not run on failure paths
+  - if the parent provided a non-empty parent thread id, do not silently drop the completion notification path from the child prompt
+  - that `send_input` message should use a short user-facing template that steers the parent toward explicit result retrieval instead of inlining the raw result
+  - if a reserved companion job id is available, use this exact high-level shape for the notification message:
+    `Background Claude Code rescue finished. Open it with $cc:result <reserved-job-id>.`
+  - if no reserved job id is available, fall back to:
+    `Background Claude Code rescue finished. Inspect it with $cc:status first, then use $cc:result for the finished job you want to open.`
+  - if the parent thread is already busy with unrelated work, prefer these steering messages over embedding the raw result text
+  - do not embed the raw Claude result inside the notification message
+  - do not include any other prose in that notification message
+  - for background rescue, use that same steering message as the child's own final assistant message instead of echoing the raw companion result
   - tell the child not to inspect the repository, read files, grep, or do the task directly
   - tell the child not to reinterpret routing flags that were already resolved by the parent
   - tell the child to copy the resolved rescue task text byte-for-byte into that exact command after parent-side routing flags are removed
@@ -92,8 +139,9 @@ Subagent launch:
 Execution:
 - Foreground: spawn the rescue subagent, wait for it to finish, and return its stdout.
 - Background: spawn the rescue subagent without waiting for it in this turn. The subagent still runs the companion `task` command in the foreground inside its own thread. Background here describes only the parent thread's wait behavior.
+- Default background notify: when the parent thread id was captured successfully, the background built-in child may wake the parent with one synthetic follow-up turn after success.
 
 Output:
 - Foreground: return the subagent's companion stdout exactly as-is. Do not paraphrase, summarize, or add commentary before or after it.
-- Background: do not wait for the subagent output. After launching it, tell the user `Claude Code rescue started in the background. Check $cc:status for progress.` You may also mention `$cc:result` once a job finishes.
+- Background: do not wait for the subagent output. After launching it, tell the user `Claude Code rescue started in the background. Check the subagent session or $cc:status for progress, and once it's done, we will let you know to see the results.`
 - If the companion reports missing setup or authentication, direct the user to `$cc:setup`.

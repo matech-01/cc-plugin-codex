@@ -23,7 +23,7 @@ Rules:
 
 Execution mode rules:
 - If the raw arguments include `--wait`, do not ask. Run in the foreground.
-- If the raw arguments include `--background`, do not ask. Run in a Codex background command.
+- If the raw arguments include `--background`, do not ask. Run in background through the built-in adversarial-review subagent path.
 - Otherwise, estimate the review size before asking:
   - For working-tree review, start with `git status --short --untracked-files=all`.
   - For working-tree review, also inspect both `git diff --shortstat --cached` and `git diff --shortstat`.
@@ -54,7 +54,41 @@ Foreground flow:
 - Do not fix anything mentioned in the review output.
 
 Background flow:
-- Launch the same companion adversarial-review command in a Codex background command or session, but use `--view-state defer` on the companion command. Do not append `--background` to the companion command.
+- For background adversarial review, use Codex's built-in `default` subagent instead of a detached background shell command.
+- Before spawning the built-in child, reserve a review job id by running:
+  `node "<plugin-root>/scripts/claude-companion.mjs" review-reserve-job --json`
+- If that helper returns a non-empty `jobId`, pass it into the companion command as an internal `--job-id <reserved-job-id>` routing flag.
+- If the built-in review is running in background, the parent should first capture its own thread id by running:
+  `node -e "process.stdout.write(process.env.CODEX_THREAD_ID || '')"`
+- If that command returns a non-empty thread id, pass it into the child prompt as the parent thread id for one-shot completion notification.
+- Spawn exactly one transient forwarding child through `spawn_agent` with:
+  - `agent_type: "default"`
+  - `fork_context: false`
+  - `model: "gpt-5.4-mini"`
+  - `reasoning_effort: "medium"`
+- Prefer a self-contained child message over inheriting parent history. The built-in adversarial-review child should not rely on full parent thread replay for normal operation.
+- Only consider `fork_context: true` as a last resort for a short follow-up where essential context truly cannot be summarized. Avoid it for large or long-lived threads because it can exhaust the child context window.
+- Before spawning the built-in child, emit one short commentary update that records the attempted subagent model selection. Default text should clearly say the parent is starting the built-in adversarial-review child with `gpt-5.4-mini` at `medium` effort.
+- If `spawn_agent` rejects `gpt-5.4-mini` with an explicit model-unavailable error such as `Unknown model`, `model unavailable`, or equivalent "not in list / unavailable" wording, retry once with `model: "gpt-5.4"` and the same `reasoning_effort: "medium"`.
+- If that fallback happens, emit one short commentary update that clearly says `gpt-5.4-mini` was unavailable and the parent is retrying with `gpt-5.4`.
+- Do not use that fallback for arbitrary failures.
+- The built-in child must be a pure forwarder. It should:
+  - run exactly one shell command
+  - execute:
+    `node "<plugin-root>/scripts/claude-companion.mjs" adversarial-review --view-state defer <arguments with --wait/--background removed>`
+  - include `--job-id <reserved-job-id>` when the parent reserved one
+  - return only that command's stdout exactly, with no added commentary
+  - ignore stderr progress chatter such as `[cc] ...` lines and preserve only the final stdout-equivalent result text
+  - not inspect the repo or perform the review itself
+  - if a parent thread id is available, allow one extra `send_input` after success and before finishing
+  - if a reserved review job id is available, use this exact notification message:
+    `Background Claude Code adversarial review finished. Open it with $cc:result <reserved-job-id>.`
+  - otherwise fall back to:
+    `Background Claude Code adversarial review finished. Inspect it with $cc:status first, then use $cc:result for the finished job you want to open.`
+  - use these steering messages instead of embedding the raw review result in the notification
+  - do not embed the raw Claude result inside the notification message
+  - do not include any other prose in that notification message
+  - use that same steering message as the child's own final assistant message instead of echoing the raw review result
 - Do not wait for completion in this turn.
-- After launching, tell the user: `Claude Code adversarial review started in the background. Check $cc:status for progress.`
+- After launching, tell the user: `Claude Code adversarial review started in the background. Check the subagent session or $cc:status for progress, and once it's done, we will let you know to see the results.`
 - Do not fix anything mentioned in the review output.

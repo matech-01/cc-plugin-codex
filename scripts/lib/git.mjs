@@ -10,6 +10,7 @@ import { isProbablyText } from "./fs.mjs";
 import { runCommand, runCommandChecked } from "./process.mjs";
 
 const MAX_UNTRACKED_BYTES = 24 * 1024;
+const MAX_INLINE_REVIEW_DIFF_BYTES = 64 * 1024;
 
 function git(cwd, args, options = {}) {
   return runCommand("git", args, { cwd, ...options });
@@ -219,7 +220,13 @@ function formatSection(title, body) {
 function formatUntrackedFile(cwd, relativePath) {
   const absolutePath = path.join(cwd, relativePath);
   try {
-    const stat = fs.statSync(absolutePath);
+    const stat = fs.lstatSync(absolutePath);
+    if (stat.isDirectory()) {
+      return `### ${relativePath}\n(skipped: untracked directory)`;
+    }
+    if (stat.isSymbolicLink()) {
+      return `### ${relativePath}\n(skipped: symlink)`;
+    }
     if (stat.size > MAX_UNTRACKED_BYTES) {
       return `### ${relativePath}\n(skipped: ${stat.size} bytes exceeds ${MAX_UNTRACKED_BYTES} byte limit)`;
     }
@@ -234,8 +241,22 @@ function formatUntrackedFile(cwd, relativePath) {
     if (error?.code === "ENOENT") {
       return `### ${relativePath}\n(skipped: file disappeared before it could be read)`;
     }
+    if (error?.code === "EISDIR") {
+      return `### ${relativePath}\n(skipped: untracked directory)`;
+    }
     throw error;
   }
+}
+
+function shouldInlineReviewDiff(...sections) {
+  let totalBytes = 0;
+  for (const section of sections) {
+    totalBytes += Buffer.byteLength(String(section ?? ""), "utf8");
+    if (totalBytes > MAX_INLINE_REVIEW_DIFF_BYTES) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function collectWorkingTreeContext(cwd, state) {
@@ -243,11 +264,22 @@ function collectWorkingTreeContext(cwd, state) {
   const stagedDiff = gitChecked(cwd, ["diff", "--cached", "--no-ext-diff", "--submodule=diff"]).stdout;
   const unstagedDiff = gitChecked(cwd, ["diff", "--no-ext-diff", "--submodule=diff"]).stdout;
   const untrackedBody = state.untracked.map((file) => formatUntrackedFile(cwd, file)).join("\n\n");
+  const inlineDiffs = shouldInlineReviewDiff(status, stagedDiff, unstagedDiff, untrackedBody);
 
   const parts = [
     formatSection("Git Status", status),
-    formatSection("Staged Diff", stagedDiff),
-    formatSection("Unstaged Diff", unstagedDiff),
+    formatSection(
+      "Staged Diff",
+      inlineDiffs
+        ? stagedDiff
+        : "Large diff omitted. Inspect staged changes directly with read-only git commands such as `git diff --cached --no-ext-diff --submodule=diff`."
+    ),
+    formatSection(
+      "Unstaged Diff",
+      inlineDiffs
+        ? unstagedDiff
+        : "Large diff omitted. Inspect unstaged changes directly with read-only git commands such as `git diff --no-ext-diff --submodule=diff`."
+    ),
     formatSection("Untracked Files", untrackedBody)
   ];
 
@@ -265,6 +297,7 @@ function collectBranchContext(cwd, baseRef) {
   const logOutput = gitChecked(cwd, ["log", "--oneline", "--decorate", commitRange]).stdout.trim();
   const diffStat = gitChecked(cwd, ["diff", "--stat", commitRange]).stdout.trim();
   const diff = gitChecked(cwd, ["diff", "--no-ext-diff", "--submodule=diff", commitRange]).stdout;
+  const inlineDiff = shouldInlineReviewDiff(logOutput, diffStat, diff);
 
   return {
     mode: "branch",
@@ -272,7 +305,12 @@ function collectBranchContext(cwd, baseRef) {
     content: [
       formatSection("Commit Log", logOutput),
       formatSection("Diff Stat", diffStat),
-      formatSection("Branch Diff", diff)
+      formatSection(
+        "Branch Diff",
+        inlineDiff
+          ? diff
+          : `Large diff omitted. Inspect the branch diff directly with read-only git commands such as \`git diff --no-ext-diff --submodule=diff ${commitRange}\`.`
+      )
     ].join("\n")
   };
 }

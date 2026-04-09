@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.0.4
+
+- Make background built-in rescue/review completions steer users to `$cc:result <job-id>` instead of inlining raw child output.
+- Harden reserved job-id handling by requiring real reservations, sanitizing reserved-job paths, and releasing reservations across validation and job-creation failures.
+- Add regression coverage for reserved job ids, background completion steering, large diff omission, and untracked directory/symlink review context handling.
+- Refresh the README to be more install-first and user-friendly for Codex users trying Claude Code for the first time.
+
 ## v1.0.3
 
 - Refresh the README opening copy and update the bundled visual assets for launch/readme presentation.
