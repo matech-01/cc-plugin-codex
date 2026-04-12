@@ -293,6 +293,8 @@ cd ~/.codex/plugins/cc
 node scripts/local-plugin-install.mjs install --plugin-root ~/.codex/plugins/cc
 ```
 
+`local-plugin-install.mjs` expects `--plugin-root` to be the managed install directory itself. If you want to install from an arbitrary checkout path, use `npx cc-plugin-codex install` instead.
+
 ### Update
 
 Re-run the install command — it's idempotent.

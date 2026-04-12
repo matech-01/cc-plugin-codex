@@ -117,6 +117,26 @@ function runLocalPluginInstaller(command, pluginRoot, homeDir, extraEnv = {}) {
   return result;
 }
 
+function runLocalPluginInstallerExpectFailure(command, pluginRoot, homeDir, extraEnv = {}) {
+  const result = spawnSync(
+    process.execPath,
+    [path.join(pluginRoot, "scripts", "local-plugin-install.mjs"), command, "--plugin-root", pluginRoot],
+    {
+      cwd: pluginRoot,
+      env: {
+        ...process.env,
+        HOME: homeDir,
+        USERPROFILE: homeDir,
+        ...extraEnv,
+      },
+      encoding: "utf8",
+    }
+  );
+
+  assert.notEqual(result.status, 0, "expected local-plugin-install to fail");
+  return result;
+}
+
 function createFakeCodex(homeDir, codexHome = path.join(homeDir, ".codex")) {
   const scriptPath = makeTempHelper("fake-codex-app-server");
   const logPath = path.join(codexHome, "fake-codex-requests.log");
@@ -643,6 +663,20 @@ describe("installer-cli", () => {
 
     assert.ok(skillText.includes(normalizedInstallDir));
     assert.doesNotMatch(skillText, /<installed-plugin-root>/i);
+  });
+
+  it("rejects direct source-root installs outside the managed plugin directory", () => {
+    const homeDir = makeTempHome();
+    const sourceRoot = makeTempSource();
+    const fakeCodex = createFakeCodex(homeDir);
+    copyFixture(sourceRoot);
+
+    const result = runLocalPluginInstallerExpectFailure("install", sourceRoot, homeDir, fakeCodex.env);
+    const expectedInstallDir = path.join(homeDir, ".codex", "plugins", "cc").replace(/\\/g, "/");
+
+    assert.match(result.stderr, /Unsupported --plugin-root/i);
+    assert.match(result.stderr.replace(/\\/g, "/"), new RegExp(expectedInstallDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    assert.match(result.stderr, /npx cc-plugin-codex install/i);
   });
 
   it("installs successfully when CODEX_HOME is outside the user's home directory", () => {

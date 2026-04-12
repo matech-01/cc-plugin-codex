@@ -99,6 +99,18 @@ function normalizeTrailingNewline(text) {
   return `${text.replace(/\s*$/, "")}\n`;
 }
 
+function assertSupportedPluginRoot(pluginRoot) {
+  if (samePath(pluginRoot, INSTALLED_PLUGIN_ROOT)) {
+    return;
+  }
+
+  throw new Error(
+    `Unsupported --plugin-root ${pluginRoot}. ` +
+      `For a local checkout install, clone the plugin into ${INSTALLED_PLUGIN_ROOT} and rerun this script there, ` +
+      `or use \`npx cc-plugin-codex install\` from any checkout.`
+  );
+}
+
 function formatWrapperName(skillName) {
   return `${PLUGIN_NAME}-${skillName}`;
 }
@@ -496,6 +508,7 @@ async function uninstallPluginThroughCodex() {
 }
 
 export async function install(pluginRoot, skipHookInstall) {
+  assertSupportedPluginRoot(pluginRoot);
   if (
     samePath(pluginRoot, INSTALLED_PLUGIN_ROOT) &&
     process.env.CC_PLUGIN_CODEX_SKILLS_MATERIALIZED !== "1"
