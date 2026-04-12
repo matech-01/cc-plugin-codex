@@ -55,7 +55,8 @@ That's the entire install. It:
 - Installs lifecycle, review-gate, and unread-result hooks
 
 On Windows, prefer the `npx` path above. The shell-script installer below is POSIX-only.
-The maintained CI matrix now covers Windows, macOS, and Linux. The `npx` install path is the cross-platform path we test on every release.
+Codex CLI's official guidance still treats Windows support as experimental and recommends a WSL workspace for the best Codex experience. Claude Code supports both native Windows and WSL. In hosted CI we currently keep Windows on the native cross-platform core suite, while full integration and E2E coverage run on Linux and macOS.
+The `npx` install path is the cross-platform path we test on every release.
 
 > **Prerequisites:** Node.js 18+, Codex with hook support, and `claude` CLI installed and authenticated.
 > If you don't have the Claude CLI yet:
@@ -292,6 +293,8 @@ git clone https://github.com/sendbird/cc-plugin-codex.git ~/.codex/plugins/cc
 cd ~/.codex/plugins/cc
 node scripts/local-plugin-install.mjs install --plugin-root ~/.codex/plugins/cc
 ```
+
+`local-plugin-install.mjs` expects `--plugin-root` to be the managed install directory itself. If you want to install from an arbitrary checkout path, use `npx cc-plugin-codex install` instead.
 
 ### Update
 
