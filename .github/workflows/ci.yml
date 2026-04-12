@@ -38,6 +38,8 @@ jobs:
         with:
           node-version: 24
           cache: npm
+      - run: npm install -g @openai/codex
+      - run: codex --version
       - run: npm ci
       - run: npm run check:version-sync
       - run: npm run check:changelog

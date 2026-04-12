@@ -35,6 +35,20 @@ function codexAvailable() {
   return result.status === 0;
 }
 
+it("requires the codex CLI when E2E runs in CI", (t) => {
+  if (codexAvailable()) {
+    return;
+  }
+
+  if (process.env.CI) {
+    assert.fail(
+      "codex CLI is not available in this CI environment; full E2E coverage requires installing @openai/codex first"
+    );
+  }
+
+  t.skip("codex CLI is not available in this environment");
+});
+
 function createFakeClaudeBinary(binDir, logFile) {
   const claudePath = path.join(binDir, "claude");
   const source = `#!/usr/bin/env node
