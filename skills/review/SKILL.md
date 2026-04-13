@@ -1,11 +1,15 @@
 ---
 name: review
-description: 'Run a standard Claude Code review of local git changes in this repository. Args: --wait, --background, --base <ref>, --scope <auto|working-tree|branch>, --model <model>. Use for normal diff review requests, not staged-only review or custom focus text.'
+description: 'Run a standard Claude Code review of local git changes in this repository. Args: --wait, --background, --base <ref>, --scope <auto|working-tree|branch>, --model <model>. Use for straightforward correctness-oriented diff review when the user wants findings only, not custom focus text, adversarial framing, or implementation work.'
 ---
 
 # Claude Code Review
 
 Use this skill when the user wants Claude Code to review the current working tree or a branch diff in this repository.
+
+Choose `$cc:review` only for straightforward review requests where the user mainly wants correctness findings on the current diff.
+If the user wants stronger challenge on design, rollout risk, migration risk, configuration behavior, template mismatch elimination, or any custom focus text, route to `$cc:adversarial-review` instead.
+If the user wants Claude Code to investigate, validate by changing code, or actually fix/implement something, route to `$cc:rescue` instead.
 
 Do not derive the companion path from this skill file or any cache directory. Always run the installed copy:
 `node "<installed-plugin-root>/scripts/claude-companion.mjs" review ...`

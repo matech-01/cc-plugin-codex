@@ -101,6 +101,11 @@ When it finishes, Codex should nudge you toward the right result. If not, `$cc:s
 | `$cc:cancel` | Cancel an active background job |
 | `$cc:setup` | Verify installation, auth, hooks, and review gate |
 
+Quick routing rule:
+- Use `$cc:review` for straightforward correctness review of the current diff.
+- Use `$cc:adversarial-review` for riskier config/template/migration/design changes, or whenever you want stronger challenge on assumptions and tradeoffs.
+- Use `$cc:rescue` when you want Claude Code to investigate, validate by changing code, or actually fix/implement something.
+
 ### `$cc:review`
 
 Standard read-only review of your current work.

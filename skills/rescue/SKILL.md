@@ -1,6 +1,6 @@
 ---
 name: rescue
-description: 'Delegate a substantial diagnosis, implementation, or follow-up task to Claude Code through the tracked-job runtime. Args: --background, --wait, --resume, --resume-last, --fresh, --write, --model <model>, --effort <low|medium|high|max>, --prompt-file <path>, [task text]. Use for deeper work, not for standard review or quick local questions.'
+description: 'Delegate a substantial diagnosis, implementation, or follow-up task to Claude Code through the tracked-job runtime. Args: --background, --wait, --resume, --resume-last, --fresh, --write, --model <model>, --effort <low|medium|high|max>, --prompt-file <path>, [task text]. Use when Claude should investigate or change things, not when the user only wants review findings.'
 ---
 
 # Claude Code Rescue
@@ -11,6 +11,9 @@ Spawn exactly one rescue forwarding subagent whose only job is to run one compan
 Foreground rescue responses must be that subagent's output verbatim.
 
 Use this skill when the user wants Claude Code to investigate, implement, or continue substantial work in this repository.
+
+Prefer `$cc:rescue` when the user wants Claude Code to diagnose the issue, validate a risky change by actually editing or testing, apply fixes from a prior review, or carry a task forward across multiple steps.
+Do not use rescue for "just review this diff" unless the user also wants follow-through work beyond review findings.
 
 Do not derive the companion path from this skill file or any cache directory. Always run the installed copy:
 `node "<installed-plugin-root>/scripts/claude-companion.mjs" task ...`
