@@ -34,6 +34,9 @@ Background contract:
   - return stdout only
   - ignore stderr progress chatter such as `[cc] ...`
   - do not inspect the repo or perform the review itself
+  - run the companion command as one blocking foreground shell-tool call, not as a background terminal/session
+  - do not request a shell session id, poll a shell session later, or return before the companion command exits
+  - if the available shell tool is `exec_command`, call it once in non-interactive mode and wait for command exit in that same call
   - use at most one `send_input` completion notification on success
   - mention the tool name `send_input` literally in the child instructions
   - use the exact tool shape `send_input({ target: <parent-thread-id>, message: <steering-message> })`

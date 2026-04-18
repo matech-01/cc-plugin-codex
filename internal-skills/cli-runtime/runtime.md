@@ -46,6 +46,9 @@ Task defaults:
 - Use a structured file-write path to create that prompt file when possible. Do not solve shell quoting by wrapping the same long task inside another brittle inline shell command.
 - If the tool output includes stderr progress chatter and a final stdout-style result, ignore the progress chatter and preserve only the final stdout-equivalent result text.
 - Return the stdout of the `task` command exactly as-is.
+- Run the companion command as one blocking foreground shell-tool call, not as a background terminal/session.
+- Do not request a shell session id, poll a shell session later, or return before the companion command exits.
+- If the available shell tool is `exec_command`, call it once in non-interactive mode and wait for command exit in that same call.
 - If the parent supplied a non-empty parent thread id for background completion, allow at most one success-only `send_input` notification before finishing.
 - Mention the tool name `send_input` literally when describing that notification path.
 - Use the exact tool shape `send_input({ target: <parent-thread-id>, message: <steering-message> })`.

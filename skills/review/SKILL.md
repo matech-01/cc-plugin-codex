@@ -88,6 +88,9 @@ Background flow:
   - run exactly one shell command
   - execute:
     `node "<installed-plugin-root>/scripts/claude-companion.mjs" review --view-state defer <arguments with --wait/--background removed>`
+  - run that command as one blocking foreground shell-tool call, not as a background terminal/session
+  - do not request a shell session id, poll a shell session later, or return before the companion command exits
+  - if the available shell tool is `exec_command`, call it once in non-interactive mode and wait for command exit in that same call
   - include `--owner-session-id <owner-session-id>` only when the parent resolved a non-empty owner session id
   - include `--job-id <reserved-job-id>` when the parent reserved one
   - never leave an empty routing placeholder such as `--owner-session-id  --job-id`
