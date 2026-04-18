@@ -832,6 +832,9 @@ function startMockProvider({
               spawnMessage ??
               "You are a transient forwarding worker for Claude Code rescue.\n" +
               "Run exactly one shell command.\n" +
+              "Run that command as one blocking foreground shell-tool call, not as a background terminal or session.\n" +
+              "Do not request a shell session id, poll a shell session later, or return before the command exits.\n" +
+              "If the shell tool is exec_command, call it once in non-interactive mode and wait for exit in that same call.\n" +
               "Return only that command's stdout text exactly.\n" +
               "Ignore stderr progress chatter such as [cc] lines.\n" +
               "If the tool output includes both stderr progress and a final stdout-style result, preserve only the final stdout-equivalent result text.\n" +
@@ -860,6 +863,18 @@ function startMockProvider({
               bodyText.includes("Run exactly one shell command") ||
                 bodyText.includes("Run exactly this command and return stdout unchanged"),
               "spawned child turn should receive the forwarding contract"
+            );
+            assert.ok(
+              bodyText.includes("blocking foreground shell-tool call, not as a background terminal or session"),
+              "built-in child should be told not to launch a background terminal/session"
+            );
+            assert.ok(
+              bodyText.includes("Do not request a shell session id, poll a shell session later, or return before the command exits."),
+              "built-in child should be told not to return a shell session before the command exits"
+            );
+            assert.ok(
+              bodyText.includes("If the shell tool is exec_command, call it once in non-interactive mode and wait for exit in that same call."),
+              "built-in child should be told how to use exec_command without backgrounding"
             );
             assert.ok(
               bodyText.includes("transient forwarding worker for Claude Code rescue"),
@@ -1255,6 +1270,11 @@ describe("Codex rescue-skill E2E", () => {
       taskCommand:
         `node ${JSON.stringify(COMPANION_SCRIPT)} task --fresh --job-id ${JSON.stringify(reservedJobId)} --view-state defer ${JSON.stringify(taskPrompt)}`,
       expectedChildNeedles: ["--view-state defer", "--job-id", reservedJobId],
+      expectedParentNeedles: [
+        "blocking foreground shell-tool call, not as a background terminal/session",
+        "do not request a shell session id, poll a shell session later, or return before the companion command exits",
+        "if the available shell tool is `exec_command`, call it once in non-interactive mode and wait for command exit in that same call",
+      ],
       notificationMessage,
     });
     testEnv.providerPort = await provider.listen();
@@ -1749,6 +1769,9 @@ describe("Codex direct-skill E2E", () => {
         "background-routing-context --kind review --json",
         "--owner-session-id <owner-session-id>",
         "Never satisfy background review by running the companion command itself with shell backgrounding",
+        "blocking foreground shell-tool call, not as a background terminal/session",
+        "do not request a shell session id, poll a shell session later, or return before the companion command exits",
+        "if the available shell tool is `exec_command`, call it once in non-interactive mode and wait for command exit in that same call",
         "allow one extra `send_input` call after a successful shell result",
         "must target the provided parent thread id",
         "do not silently drop the completion notification path from the child prompt",
@@ -1771,6 +1794,9 @@ describe("Codex direct-skill E2E", () => {
         "You are a pure forwarder for a background Claude Code review job.\n" +
         "Do not inspect the repo, do not review anything yourself, and do not add commentary.\n" +
         "Run exactly one shell command and capture only the stdout-equivalent final result text from that command, ignoring stderr progress chatter like [cc] lines.\n" +
+        "Run that command as one blocking foreground shell-tool call, not as a background terminal or session.\n" +
+        "Do not request a shell session id, poll a shell session later, or return before the command exits.\n" +
+        "If the shell tool is exec_command, call it once in non-interactive mode and wait for exit in that same call.\n" +
         "If the command succeeds and a parent thread id is available, send exactly this notification to the parent thread before finishing: " +
         JSON.stringify(notificationMessage) + "\n" +
         "Use that same sentence as your own final assistant message.\n" +
@@ -1955,6 +1981,9 @@ describe("Codex direct-skill E2E", () => {
         "background-routing-context --kind review --json",
         "--owner-session-id <owner-session-id>",
         "Never satisfy background adversarial review by running the companion command itself with shell backgrounding",
+        "blocking foreground shell-tool call, not as a background terminal/session",
+        "do not request a shell session id, poll a shell session later, or return before the companion command exits",
+        "if the available shell tool is `exec_command`, call it once in non-interactive mode and wait for command exit in that same call",
         "allow one extra `send_input` call after a successful shell result",
         "must target the provided parent thread id",
         "do not silently drop the completion notification path from the child prompt",
@@ -1978,6 +2007,9 @@ describe("Codex direct-skill E2E", () => {
         "You are a pure forwarder for a background Claude Code adversarial review job.\n" +
         "Do not inspect the repo, do not review anything yourself, and do not add commentary.\n" +
         "Run exactly one shell command and capture only the stdout-equivalent final result text from that command, ignoring stderr progress chatter like [cc] lines.\n" +
+        "Run that command as one blocking foreground shell-tool call, not as a background terminal or session.\n" +
+        "Do not request a shell session id, poll a shell session later, or return before the command exits.\n" +
+        "If the shell tool is exec_command, call it once in non-interactive mode and wait for exit in that same call.\n" +
         "If the command succeeds and a parent thread id is available, send exactly this notification to the parent thread before finishing: " +
         JSON.stringify(notificationMessage) + "\n" +
         "Use that same sentence as your own final assistant message.\n" +
