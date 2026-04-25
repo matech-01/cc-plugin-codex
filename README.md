@@ -81,6 +81,17 @@ Codex CLI's official guidance still treats Windows support as experimental and r
 > npm install -g @anthropic-ai/claude-code && claude auth login
 > ```
 
+> **Optional custom launcher:** If you need this plugin to invoke Claude Code
+> through a wrapper script instead of bare `claude`, either set
+> `CC_PLUGIN_CODEX_CLAUDE_BIN` before starting Codex or write a local config file
+> at `~/.config/cc-plugin-codex/config.json` with:
+> ```json
+> {
+>   "claudeBin": "/absolute/path/to/launcher"
+> }
+> ```
+> This is useful for profile-based or gateway-based Claude setups.
+
 ### 2. Verify
 
 Open Codex and run:
@@ -374,6 +385,11 @@ npx cc-plugin-codex uninstall
 npm install -g @anthropic-ai/claude-code
 claude auth login
 ```
+
+**`$cc:setup` reports Claude auth problems for a custom launcher setup**
+Make sure Codex is started with the same environment your launcher expects.
+You can point the plugin at a custom launcher with
+`CC_PLUGIN_CODEX_CLAUDE_BIN`.
 
 **Commands not recognized in Codex**
 Re-run install. If your Codex build doesn't support `plugin/install`, the installer falls back to config-based activation and generates skill wrapper files automatically. You'll see a warning in the install output.

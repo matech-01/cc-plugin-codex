@@ -15,7 +15,10 @@ import path from "node:path";
 import { normalizePathSlashes, resolvePluginRuntimeRoot } from "./codex-paths.mjs";
 import { getProcessIdentity, validateProcessIdentity } from "./process.mjs";
 
-const CLAUDE_BIN = "claude";
+const CLAUDE_BIN_ENV = "CC_PLUGIN_CODEX_CLAUDE_BIN";
+const DEFAULT_CLAUDE_BIN = "claude";
+const CONFIG_DIR_ENV = "XDG_CONFIG_HOME";
+const CONFIG_RELATIVE_PATH = path.join("cc-plugin-codex", "config.json");
 export const MAX_STREAM_PARSER_UNKNOWN_EVENTS = 50;
 export const MAX_STREAM_PARSER_PARSE_ERRORS = 50;
 export const MAX_STREAM_PARSER_TOOL_USES = 256;
@@ -71,13 +74,37 @@ function appendTextTail(existing, chunk, maxBytes) {
   return sliceTextTailByBytes(next, maxBytes);
 }
 
+export function getCompanionConfigPath() {
+  const configRoot = process.env[CONFIG_DIR_ENV] || path.join(os.homedir(), ".config");
+  return path.join(configRoot, CONFIG_RELATIVE_PATH);
+}
+
+export function readCompanionConfig() {
+  const configPath = getCompanionConfigPath();
+  if (!fs.existsSync(configPath)) {
+    return {};
+  }
+
+  try {
+    const parsed = JSON.parse(fs.readFileSync(configPath, "utf8"));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+export function getClaudeBin() {
+  const config = readCompanionConfig();
+  return process.env[CLAUDE_BIN_ENV] || config.claudeBin || DEFAULT_CLAUDE_BIN;
+}
+
 // ---------------------------------------------------------------------------
 // Availability & Auth
 // ---------------------------------------------------------------------------
 
 export function getClaudeAvailability(cwd) {
   try {
-    const result = spawnSync(CLAUDE_BIN, ["--version"], {
+    const result = spawnSync(getClaudeBin(), ["--version"], {
       cwd,
       encoding: "utf8",
       timeout: 10_000,
@@ -94,7 +121,7 @@ export function getClaudeAuthStatus(cwd) {
     return { available: true, loggedIn: true, detail: "API key configured" };
   }
   try {
-    const result = spawnSync(CLAUDE_BIN, ["auth", "status"], {
+    const result = spawnSync(getClaudeBin(), ["auth", "status"], {
       cwd,
       encoding: "utf8",
       timeout: 10_000,
@@ -539,7 +566,7 @@ export async function runClaudeTurn(cwd, prompt, options = {}) {
   });
 
   return new Promise((resolve, reject) => {
-    const proc = spawn(CLAUDE_BIN, args, {
+    const proc = spawn(getClaudeBin(), args, {
       cwd,
       detached: true, // new process group for safe cancellation
       stdio: ["ignore", "pipe", "pipe"], // stdin ignored — prompt is passed as CLI arg

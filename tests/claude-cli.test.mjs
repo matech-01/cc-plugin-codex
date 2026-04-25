@@ -2,12 +2,15 @@
  * Copyright 2026 Sendbird, Inc.
  * SPDX-License-Identifier: Apache-2.0
  */
-import { describe, it } from "node:test";
+import { afterEach, beforeEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
 
 import {
   StreamParser,
   validateTurnCompletion,
+  getCompanionConfigPath,
+  readCompanionConfig,
+  getClaudeBin,
   resolveModel,
   resolveEffort,
   buildArgs,
@@ -23,6 +26,42 @@ import {
   MAX_STREAM_PARSER_TOOL_USES,
   MAX_STREAM_PARSER_TOUCHED_FILES,
 } from "../scripts/lib/claude-cli.mjs";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
+const COMPANION_ENV_KEYS = [
+  "HOME",
+  "XDG_CONFIG_HOME",
+  "CC_PLUGIN_CODEX_CLAUDE_BIN",
+];
+
+function snapshotCompanionEnv() {
+  return Object.fromEntries(
+    COMPANION_ENV_KEYS.map((key) => [key, process.env[key]])
+  );
+}
+
+function restoreCompanionEnv(snapshot) {
+  for (const key of COMPANION_ENV_KEYS) {
+    if (snapshot[key] == null) {
+      delete process.env[key];
+    } else {
+      process.env[key] = snapshot[key];
+    }
+  }
+}
+
+function isolateCompanionEnv() {
+  const snapshot = snapshotCompanionEnv();
+  for (const key of COMPANION_ENV_KEYS) {
+    delete process.env[key];
+  }
+  process.env.HOME = fs.mkdtempSync(
+    path.join(os.tmpdir(), "cc-plugin-codex-home-")
+  );
+  return () => restoreCompanionEnv(snapshot);
+}
 
 // ===========================================================================
 // StreamParser
@@ -423,6 +462,16 @@ describe("validateTurnCompletion", () => {
 // ===========================================================================
 
 describe("resolveModel", () => {
+  let restoreEnv;
+
+  beforeEach(() => {
+    restoreEnv = isolateCompanionEnv();
+  });
+
+  afterEach(() => {
+    restoreEnv();
+  });
+
   it("maps 'sonnet' to 'claude-sonnet-4-6'", () => {
     assert.equal(resolveModel("sonnet"), "claude-sonnet-4-6");
   });
@@ -448,6 +497,82 @@ describe("resolveModel", () => {
     assert.equal(MODEL_ALIASES.size, 2);
     assert.ok(MODEL_ALIASES.has("sonnet"));
     assert.ok(MODEL_ALIASES.has("haiku"));
+  });
+});
+
+describe("Claude launcher configuration", () => {
+  let restoreEnv;
+
+  beforeEach(() => {
+    restoreEnv = isolateCompanionEnv();
+  });
+
+  afterEach(() => {
+    restoreEnv();
+  });
+
+  it("uses the default companion config path under ~/.config", () => {
+    const homeDir = process.env.HOME;
+    assert.equal(
+      getCompanionConfigPath(),
+      path.join(homeDir, ".config", "cc-plugin-codex", "config.json")
+    );
+  });
+
+  it("reads companion config from XDG_CONFIG_HOME when present", () => {
+    const configRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cc-plugin-codex-config-"));
+    const configPath = path.join(configRoot, "cc-plugin-codex", "config.json");
+    fs.mkdirSync(path.dirname(configPath), { recursive: true });
+    fs.writeFileSync(
+      configPath,
+      JSON.stringify({
+        claudeBin: "/tmp/cc-claude-launch",
+        preserveModelAliases: true,
+      }),
+      "utf8"
+    );
+    process.env.XDG_CONFIG_HOME = configRoot;
+    try {
+      assert.deepEqual(readCompanionConfig(), {
+        claudeBin: "/tmp/cc-claude-launch",
+        preserveModelAliases: true,
+      });
+    } finally {
+      delete process.env.XDG_CONFIG_HOME;
+    }
+  });
+
+  it("defaults Claude binary to 'claude'", () => {
+    assert.equal(getClaudeBin(), "claude");
+  });
+
+  it("uses CC_PLUGIN_CODEX_CLAUDE_BIN when provided", () => {
+    process.env.CC_PLUGIN_CODEX_CLAUDE_BIN = "/tmp/cc-claude-launch";
+    try {
+      assert.equal(getClaudeBin(), "/tmp/cc-claude-launch");
+    } finally {
+      delete process.env.CC_PLUGIN_CODEX_CLAUDE_BIN;
+    }
+  });
+
+  it("uses config-file claudeBin when env override is unset", () => {
+    const configRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cc-plugin-codex-config-"));
+    const configPath = path.join(configRoot, "cc-plugin-codex", "config.json");
+    fs.mkdirSync(path.dirname(configPath), { recursive: true });
+    fs.writeFileSync(
+      configPath,
+      JSON.stringify({
+        claudeBin: "/tmp/cc-claude-launch",
+      }),
+      "utf8"
+    );
+    delete process.env.CC_PLUGIN_CODEX_CLAUDE_BIN;
+    process.env.XDG_CONFIG_HOME = configRoot;
+    try {
+      assert.equal(getClaudeBin(), "/tmp/cc-claude-launch");
+    } finally {
+      delete process.env.XDG_CONFIG_HOME;
+    }
   });
 });
 
@@ -522,6 +647,16 @@ describe("resolveEffort", () => {
 // ===========================================================================
 
 describe("buildArgs", () => {
+  let restoreEnv;
+
+  beforeEach(() => {
+    restoreEnv = isolateCompanionEnv();
+  });
+
+  afterEach(() => {
+    restoreEnv();
+  });
+
   it("always starts with -p", () => {
     const args = buildArgs("prompt");
     assert.equal(args[0], "-p");
