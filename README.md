@@ -194,6 +194,19 @@ $cc:rescue --model sonnet --effort medium investigate the flaky test
 | `--effort <level>` | Reasoning effort: `low`, `medium`, `high`, `max` |
 | `--prompt-file <path>` | Read task description from a file |
 
+If your Claude launcher or provider expects model aliases like `sonnet` and
+`haiku` to resolve at runtime, either set
+`CC_PLUGIN_CODEX_PRESERVE_MODEL_ALIASES=1` before starting Codex or add:
+
+```json
+{
+  "preserveModelAliases": true
+}
+```
+
+to `~/.config/cc-plugin-codex/config.json`. By default, the plugin maps those
+aliases to built-in Claude model IDs.
+
 **Resume behavior:** If you don't pass `--resume` or `--fresh`, rescue checks for a resumable Claude session and asks once whether to continue or start fresh. Your phrasing guides the recommendation — "continue the last run" → resume, "start over" → fresh.
 
 Background rescue runs through a built-in Codex subagent. When the child finishes, the plugin tries to nudge the parent thread with the exact `$cc:result <job-id>` to open.
@@ -396,6 +409,12 @@ Re-run install. If your Codex build doesn't support `plugin/install`, the instal
 
 **Hooks not firing**
 Check that `codex_hooks = true` is set in `~/.codex/config.toml` under `[features]`. Run `$cc:setup` to verify and auto-repair.
+
+**`$cc:setup` reports Claude auth problems for a custom launcher or bearer-token setup**
+Make sure Codex is started with the same environment your launcher expects.
+This plugin accepts either `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` as a
+valid authenticated Claude CLI environment, and you can point the plugin at a
+custom launcher with `CC_PLUGIN_CODEX_CLAUDE_BIN`.
 
 **A background job finished but I did not get the result nudge**
 Use:

@@ -11,6 +11,7 @@ import {
   getCompanionConfigPath,
   readCompanionConfig,
   getClaudeBin,
+  getClaudeAuthStatus,
   resolveModel,
   resolveEffort,
   buildArgs,
@@ -34,6 +35,9 @@ const COMPANION_ENV_KEYS = [
   "HOME",
   "XDG_CONFIG_HOME",
   "CC_PLUGIN_CODEX_CLAUDE_BIN",
+  "CC_PLUGIN_CODEX_PRESERVE_MODEL_ALIASES",
+  "ANTHROPIC_AUTH_TOKEN",
+  "ANTHROPIC_API_KEY",
 ];
 
 function snapshotCompanionEnv() {
@@ -493,6 +497,16 @@ describe("resolveModel", () => {
     assert.equal(resolveModel(""), undefined);
   });
 
+  it("preserves aliases when CC_PLUGIN_CODEX_PRESERVE_MODEL_ALIASES=1", () => {
+    process.env.CC_PLUGIN_CODEX_PRESERVE_MODEL_ALIASES = "1";
+    try {
+      assert.equal(resolveModel("sonnet"), "sonnet");
+      assert.equal(resolveModel("haiku"), "haiku");
+    } finally {
+      delete process.env.CC_PLUGIN_CODEX_PRESERVE_MODEL_ALIASES;
+    }
+  });
+
   it("MODEL_ALIASES map has expected entries", () => {
     assert.equal(MODEL_ALIASES.size, 2);
     assert.ok(MODEL_ALIASES.has("sonnet"));
@@ -570,6 +584,76 @@ describe("Claude launcher configuration", () => {
     process.env.XDG_CONFIG_HOME = configRoot;
     try {
       assert.equal(getClaudeBin(), "/tmp/cc-claude-launch");
+    } finally {
+      delete process.env.XDG_CONFIG_HOME;
+    }
+  });
+});
+
+describe("getClaudeAuthStatus", () => {
+  let restoreEnv;
+
+  beforeEach(() => {
+    restoreEnv = isolateCompanionEnv();
+  });
+
+  afterEach(() => {
+    restoreEnv();
+  });
+
+  it("treats ANTHROPIC_AUTH_TOKEN as authenticated", () => {
+    process.env.ANTHROPIC_AUTH_TOKEN = "token-value";
+    try {
+      assert.deepEqual(getClaudeAuthStatus(process.cwd()), {
+        available: true,
+        loggedIn: true,
+        detail: "Auth token configured",
+      });
+    } finally {
+      delete process.env.ANTHROPIC_AUTH_TOKEN;
+    }
+  });
+
+  it("treats ANTHROPIC_API_KEY as authenticated", () => {
+    process.env.ANTHROPIC_API_KEY = "key-value";
+    try {
+      assert.deepEqual(getClaudeAuthStatus(process.cwd()), {
+        available: true,
+        loggedIn: true,
+        detail: "API key configured",
+      });
+    } finally {
+      delete process.env.ANTHROPIC_API_KEY;
+    }
+  });
+});
+
+describe("model alias preservation", () => {
+  let restoreEnv;
+
+  beforeEach(() => {
+    restoreEnv = isolateCompanionEnv();
+  });
+
+  afterEach(() => {
+    restoreEnv();
+  });
+
+  it("preserves aliases when config file enables it", () => {
+    const configRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cc-plugin-codex-config-"));
+    const configPath = path.join(configRoot, "cc-plugin-codex", "config.json");
+    fs.mkdirSync(path.dirname(configPath), { recursive: true });
+    fs.writeFileSync(
+      configPath,
+      JSON.stringify({
+        preserveModelAliases: true,
+      }),
+      "utf8"
+    );
+    process.env.XDG_CONFIG_HOME = configRoot;
+    try {
+      assert.equal(resolveModel("sonnet"), "sonnet");
+      assert.equal(resolveModel("haiku"), "haiku");
     } finally {
       delete process.env.XDG_CONFIG_HOME;
     }

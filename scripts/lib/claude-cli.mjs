@@ -16,6 +16,7 @@ import { normalizePathSlashes, resolvePluginRuntimeRoot } from "./codex-paths.mj
 import { getProcessIdentity, validateProcessIdentity } from "./process.mjs";
 
 const CLAUDE_BIN_ENV = "CC_PLUGIN_CODEX_CLAUDE_BIN";
+const PRESERVE_MODEL_ALIASES_ENV = "CC_PLUGIN_CODEX_PRESERVE_MODEL_ALIASES";
 const DEFAULT_CLAUDE_BIN = "claude";
 const CONFIG_DIR_ENV = "XDG_CONFIG_HOME";
 const CONFIG_RELATIVE_PATH = path.join("cc-plugin-codex", "config.json");
@@ -98,6 +99,15 @@ export function getClaudeBin() {
   return process.env[CLAUDE_BIN_ENV] || config.claudeBin || DEFAULT_CLAUDE_BIN;
 }
 
+export function shouldPreserveModelAliases() {
+  if (process.env[PRESERVE_MODEL_ALIASES_ENV] === "1") {
+    return true;
+  }
+
+  const config = readCompanionConfig();
+  return config.preserveModelAliases === true;
+}
+
 // ---------------------------------------------------------------------------
 // Availability & Auth
 // ---------------------------------------------------------------------------
@@ -117,6 +127,9 @@ export function getClaudeAvailability(cwd) {
 }
 
 export function getClaudeAuthStatus(cwd) {
+  if (process.env.ANTHROPIC_AUTH_TOKEN) {
+    return { available: true, loggedIn: true, detail: "Auth token configured" };
+  }
   if (process.env.ANTHROPIC_API_KEY) {
     return { available: true, loggedIn: true, detail: "API key configured" };
   }
@@ -476,6 +489,9 @@ export const VALID_EFFORTS = new Set(["low", "medium", "high", "max"]);
 
 export function resolveModel(model) {
   if (!model) return undefined;
+  if (shouldPreserveModelAliases()) {
+    return model;
+  }
   return MODEL_ALIASES.get(model) ?? model;
 }
 
