@@ -399,22 +399,18 @@ npm install -g @anthropic-ai/claude-code
 claude auth login
 ```
 
-**`$cc:setup` reports Claude auth problems for a custom launcher setup**
-Make sure Codex is started with the same environment your launcher expects.
-You can point the plugin at a custom launcher with
-`CC_PLUGIN_CODEX_CLAUDE_BIN`.
-
 **Commands not recognized in Codex**
 Re-run install. If your Codex build doesn't support `plugin/install`, the installer falls back to config-based activation and generates skill wrapper files automatically. You'll see a warning in the install output.
 
 **Hooks not firing**
 Check that `codex_hooks = true` is set in `~/.codex/config.toml` under `[features]`. Run `$cc:setup` to verify and auto-repair.
 
-**`$cc:setup` reports Claude auth problems for a custom launcher or bearer-token setup**
+**`$cc:setup` reports Claude auth problems in a custom launcher or provider-backed setup**
 Make sure Codex is started with the same environment your launcher expects.
 This plugin accepts either `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` as a
 valid authenticated Claude CLI environment, and you can point the plugin at a
-custom launcher with `CC_PLUGIN_CODEX_CLAUDE_BIN`.
+custom launcher with `CC_PLUGIN_CODEX_CLAUDE_BIN` or
+`~/.config/cc-plugin-codex/config.json`.
 
 **A background job finished but I did not get the result nudge**
 Use:
